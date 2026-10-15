@@ -50,12 +50,17 @@ type replayChecker interface {
 	checkAndStore(ctx context.Context, key [32]byte, expiry, now time.Time) replayResult
 }
 
+// setNXer is the one Redis command the replay store needs; *redis.Client implements it.
+type setNXer interface {
+	SetNX(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.BoolCmd
+}
+
 // redisReplayStore records proof identifiers in Redis, so a proof accepted by one
 // gateway replica is refused by every other one. SET NX with an expiry is a single
 // atomic command: of two concurrent copies of a proof, on any replicas, exactly one
 // is stored.
 type redisReplayStore struct {
-	client      redis.Cmdable
+	client      setNXer
 	prefix      string
 	failureMode string
 	local       *replayStore

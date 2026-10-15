@@ -19,50 +19,75 @@
 package dpop
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
 
+// fakeRedis implements the one command the replay store uses, SET NX with an
+// expiry, with Redis's semantics: the first SET of a key wins, later ones report
+// false. down makes every command fail as an unreachable server would.
+type fakeRedis struct {
+	mu   sync.Mutex
+	ttls map[string]time.Duration
+	down bool
+}
+
+func newFakeRedis() *fakeRedis { return &fakeRedis{ttls: map[string]time.Duration{}} }
+
+func (f *fakeRedis) SetNX(_ context.Context, key string, _ interface{}, ttl time.Duration) *redis.BoolCmd {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.down {
+		return redis.NewBoolResult(false, errors.New("dial tcp: connection refused"))
+	}
+	if _, ok := f.ttls[key]; ok {
+		return redis.NewBoolResult(false, nil)
+	}
+	f.ttls[key] = ttl
+	return redis.NewBoolResult(true, nil)
+}
+
 // replicaWithRedis is one gateway replica: its own memory store, a shared Redis.
-func replicaWithRedis(t *testing.T, mr *miniredis.Miniredis, failureMode string) *DPoPPolicy {
+func replicaWithRedis(t *testing.T, r setNXer, failureMode string) *DPoPPolicy {
 	t.Helper()
 	p := newTestPolicy(t, nil)
-	client := redis.NewClient(&redis.Options{Addr: mr.Addr(), MaxRetries: -1})
-	t.Cleanup(func() { _ = client.Close() })
-	p.replay = &redisReplayStore{client: client, prefix: "dpop:v0:", failureMode: failureMode, local: newReplayStore(1000)}
+	p.replay = &redisReplayStore{client: r, prefix: "dpop:v0:", failureMode: failureMode, local: newReplayStore(1000)}
 	return p
 }
 
 func TestRedisReplayAcrossReplicas(t *testing.T) {
-	mr := miniredis.RunT(t)
-	a, b := replicaWithRedis(t, mr, redisFailureClosed), replicaWithRedis(t, mr, redisFailureClosed)
+	r := newFakeRedis()
+	a, b := replicaWithRedis(t, r, redisFailureClosed), replicaWithRedis(t, r, redisFailureClosed)
 	key := newKey(t, "ES256")
 	proof := key.sign(t, nil)
 	expectAllowed(t, run(a, dpopRequest(key, proof)))
 	// The same proof sent to another replica is a replay.
 	expectRejected(t, run(b, dpopRequest(key, proof)), "invalid_dpop_proof")
 
-	// Exactly one key, expiring with the proof (iat + proofMaxAge + clockSkew).
-	keys := mr.Keys()
-	if len(keys) != 1 {
-		t.Fatalf("Redis holds %d keys, want 1", len(keys))
+	// Exactly one key, prefixed, expiring with the proof (iat + proofMaxAge + clockSkew).
+	if len(r.ttls) != 1 {
+		t.Fatalf("Redis holds %d keys, want 1", len(r.ttls))
 	}
-	if ttl := mr.TTL(keys[0]); ttl <= 0 || ttl > 90*time.Second {
-		t.Errorf("key TTL = %v, want (0, 90s]", ttl)
-	}
-	if keys[0][:len("dpop:v0:")] != "dpop:v0:" {
-		t.Errorf("key %q lacks the prefix", keys[0])
+	for k, ttl := range r.ttls {
+		if !strings.HasPrefix(k, "dpop:v0:") {
+			t.Errorf("key %q lacks the prefix", k)
+		}
+		if ttl != 90*time.Second {
+			t.Errorf("key TTL = %v, want 90s", ttl)
+		}
 	}
 }
 
 func TestRedisConcurrentReplayAcrossReplicas(t *testing.T) {
-	mr := miniredis.RunT(t)
-	replicas := []*DPoPPolicy{replicaWithRedis(t, mr, redisFailureClosed), replicaWithRedis(t, mr, redisFailureClosed), replicaWithRedis(t, mr, redisFailureClosed)}
+	r := newFakeRedis()
+	replicas := []*DPoPPolicy{replicaWithRedis(t, r, redisFailureClosed), replicaWithRedis(t, r, redisFailureClosed), replicaWithRedis(t, r, redisFailureClosed)}
 	key := newKey(t, "ES256")
 	proof := key.sign(t, nil)
 	var wg sync.WaitGroup
@@ -86,9 +111,9 @@ func TestRedisConcurrentReplayAcrossReplicas(t *testing.T) {
 }
 
 func TestRedisUnavailableFailsClosed(t *testing.T) {
-	mr := miniredis.RunT(t)
-	p := replicaWithRedis(t, mr, redisFailureClosed)
-	mr.Close()
+	r := newFakeRedis()
+	r.down = true
+	p := replicaWithRedis(t, r, redisFailureClosed)
 	key := newKey(t, "ES256")
 	resp, ok := run(p, dpopRequest(key, key.sign(t, nil))).(policy.ImmediateResponse)
 	if !ok || resp.StatusCode != 503 {
@@ -97,9 +122,9 @@ func TestRedisUnavailableFailsClosed(t *testing.T) {
 }
 
 func TestRedisUnavailableFallsBackToLocal(t *testing.T) {
-	mr := miniredis.RunT(t)
-	p := replicaWithRedis(t, mr, redisFailureLocal)
-	mr.Close()
+	r := newFakeRedis()
+	r.down = true
+	p := replicaWithRedis(t, r, redisFailureLocal)
 	key := newKey(t, "ES256")
 	proof := key.sign(t, nil)
 	expectAllowed(t, run(p, dpopRequest(key, proof)))
@@ -107,22 +132,33 @@ func TestRedisUnavailableFallsBackToLocal(t *testing.T) {
 	expectRejected(t, run(p, dpopRequest(key, proof)), "invalid_dpop_proof")
 }
 
+// TestRedisConfiguredThroughParams builds the store from system parameters with the
+// real go-redis client, pointed at a port nothing listens on: the policy deploys,
+// and requests follow failureMode.
 func TestRedisConfiguredThroughParams(t *testing.T) {
-	mr := miniredis.RunT(t)
 	params := map[string]interface{}{
 		"replayStore": "redis",
-		"redis":       map[string]interface{}{"host": mr.Host(), "port": float64(mr.Server().Addr().Port), "keyPrefix": "gw1:dpop:"},
+		"redis": map[string]interface{}{
+			"host": "127.0.0.1", "port": float64(1), "keyPrefix": "gw1:dpop:",
+			"connectionTimeout": "200ms", "readTimeout": "200ms",
+		},
 	}
 	pol, err := GetPolicy(policy.PolicyMetadata{}, params)
 	if err != nil {
 		t.Fatal(err)
 	}
 	p := pol.(*DPoPPolicy)
+	store, ok := p.replay.(*redisReplayStore)
+	if !ok || store.prefix != "gw1:dpop:" || store.failureMode != redisFailureClosed {
+		t.Fatalf("replay store = %#v", p.replay)
+	}
+	if _, ok := store.client.(*redis.Client); !ok {
+		t.Fatalf("client is %T, want *redis.Client", store.client)
+	}
 	p.now = func() time.Time { return testNow }
 	key := newKey(t, "ES256")
-	expectAllowed(t, run(p, dpopRequest(key, key.sign(t, nil))))
-	if keys := mr.Keys(); len(keys) != 1 || keys[0][:9] != "gw1:dpop:" {
-		t.Errorf("Redis keys = %v", keys)
+	if resp, ok := run(p, dpopRequest(key, key.sign(t, nil))).(policy.ImmediateResponse); !ok || resp.StatusCode != 503 {
+		t.Fatalf("unreachable Redis: got %+v, want 503", resp)
 	}
 }
 
