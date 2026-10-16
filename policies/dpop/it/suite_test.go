@@ -30,6 +30,7 @@ import (
 // The dpop policy verifies proofs for an access token that jwt-auth has already validated.
 var config = suite.Config{Register: steps.Register, Companions: []string{"jwt-auth"}}
 
+// TestMain prepares the shared suite (testbench image, gateway selection) before any test runs.
 func TestMain(m *testing.M) {
 	suite.Main(m, config)
 }

@@ -67,10 +67,12 @@ type replayStore struct {
 	warned  time.Time
 }
 
+// newReplayStore returns an empty store that holds at most maxSize live entries.
 func newReplayStore(maxSize int) *replayStore {
 	return &replayStore{maxSize: maxSize, entries: make(map[[32]byte]time.Time)}
 }
 
+// resize changes the bound; entries already stored are kept.
 func (s *replayStore) resize(maxSize int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -111,6 +113,7 @@ func (s *replayStore) purgeExpired(now time.Time) {
 	}
 }
 
+// size returns the number of entries currently held.
 func (s *replayStore) size() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -124,10 +127,19 @@ type expiryEntry struct {
 
 type expiryHeap []expiryEntry
 
-func (h expiryHeap) Len() int           { return len(h) }
+// Len, Less, Swap, Push and Pop implement heap.Interface, ordering entries by expiry.
+func (h expiryHeap) Len() int { return len(h) }
+
+// Less orders entries soonest expiry first.
 func (h expiryHeap) Less(i, j int) bool { return h[i].at.Before(h[j].at) }
-func (h expiryHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *expiryHeap) Push(x any)        { *h = append(*h, x.(expiryEntry)) }
+
+// Swap exchanges two entries.
+func (h expiryHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+
+// Push appends an entry; use heap.Push.
+func (h *expiryHeap) Push(x any) { *h = append(*h, x.(expiryEntry)) }
+
+// Pop removes the last entry; use heap.Pop.
 func (h *expiryHeap) Pop() any {
 	old := *h
 	e := old[len(old)-1]

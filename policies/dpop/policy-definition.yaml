@@ -182,9 +182,11 @@ systemParameters:
           type: string
           description: >-
             What happens while Redis cannot be reached. "closed" refuses DPoP
-            requests with 503, so no proof is ever accepted unrecorded. "local" falls
-            back to the replica's in-memory store, which keeps serving and still
-            refuses replays to the same replica, but not across replicas.
+            requests with 503, so no proof is ever accepted unrecorded. "local" keeps
+            serving: each replica also records every proof it accepts in its own
+            memory and relies on that record while Redis is down, so replays to the
+            same replica are refused before, during and after an outage, but not
+            across replicas.
           enum: ["closed", "local"]
           default: "closed"
           "wso2/defaultValue": "${config.policy_configurations.dpop_v0.redis.failure_mode}"

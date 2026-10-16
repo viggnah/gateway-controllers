@@ -61,6 +61,7 @@ var (
 	rsaKey     *rsa.PrivateKey
 )
 
+// sharedRSAKey generates one 2048-bit RSA key per test run, since RSA key generation is slow.
 func sharedRSAKey(t *testing.T) *rsa.PrivateKey {
 	t.Helper()
 	rsaKeyOnce.Do(func() {
@@ -73,8 +74,10 @@ func sharedRSAKey(t *testing.T) *rsa.PrivateKey {
 	return rsaKey
 }
 
+// enc base64url-encodes without padding, as JWKs and JWTs do.
 func enc(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
+// newKey generates a client key pair for alg, with its public JWK and thumbprint.
 func newKey(t *testing.T, alg string) testKey {
 	t.Helper()
 	k := testKey{alg: alg, method: jwt.GetSigningMethod(alg)}
@@ -146,6 +149,7 @@ func (k testKey) sign(t *testing.T, edit func(claims jwt.MapClaims, header map[s
 	return s
 }
 
+// newTestPolicy builds a policy from params with a fixed clock and its own replay store.
 func newTestPolicy(t *testing.T, params map[string]interface{}) *DPoPPolicy {
 	t.Helper()
 	pol, err := GetPolicy(policy.PolicyMetadata{}, params)
@@ -158,6 +162,7 @@ func newTestPolicy(t *testing.T, params map[string]interface{}) *DPoPPolicy {
 	return p
 }
 
+// boundJWT is the AuthContext jwt-auth records for a token bound to jkt.
 func boundJWT(jkt string) *policy.AuthContext {
 	return &policy.AuthContext{
 		Authenticated:   true,
@@ -167,6 +172,7 @@ func boundJWT(jkt string) *policy.AuthContext {
 	}
 }
 
+// unboundJWT is the AuthContext of a token with no cnf claim.
 func unboundJWT() *policy.AuthContext {
 	return &policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "alice"}
 }
@@ -181,6 +187,7 @@ type reqOpts struct {
 	path      string
 }
 
+// newRequest builds a request header context, defaulting to GET https://api.example.com/orders/v1/items.
 func newRequest(o reqOpts) *policy.RequestHeaderContext {
 	headers := map[string][]string{}
 	if o.authz != nil {
@@ -214,10 +221,12 @@ func dpopRequest(key testKey, proof string) *policy.RequestHeaderContext {
 	return newRequest(reqOpts{auth: boundJWT(key.jkt), authz: []string{"DPoP " + testToken}, proofs: []string{proof}})
 }
 
+// run passes a request through the policy's request-header phase.
 func run(p *DPoPPolicy, req *policy.RequestHeaderContext) policy.RequestHeaderAction {
 	return p.OnRequestHeaders(context.Background(), req, nil)
 }
 
+// expectAllowed fails the test unless the request continues upstream.
 func expectAllowed(t *testing.T, action policy.RequestHeaderAction) policy.UpstreamRequestHeaderModifications {
 	t.Helper()
 	mods, ok := action.(policy.UpstreamRequestHeaderModifications)
@@ -228,6 +237,7 @@ func expectAllowed(t *testing.T, action policy.RequestHeaderAction) policy.Upstr
 	return mods
 }
 
+// expectRejected fails the test unless the request is refused with a challenge carrying code.
 func expectRejected(t *testing.T, action policy.RequestHeaderAction, code string) policy.ImmediateResponse {
 	t.Helper()
 	resp, ok := action.(policy.ImmediateResponse)
@@ -305,6 +315,7 @@ func TestRFC7638Thumbprint(t *testing.T) {
 
 // ─── Accepted proofs ─────────────────────────────────────────────────────────
 
+// TestValidProofEveryAlgorithm accepts a valid proof signed with each supported algorithm.
 func TestValidProofEveryAlgorithm(t *testing.T) {
 	for _, alg := range supportedAlgorithms {
 		t.Run(alg, func(t *testing.T) {
@@ -319,6 +330,7 @@ func TestValidProofEveryAlgorithm(t *testing.T) {
 	}
 }
 
+// TestForwardProofKeepsHeader keeps the DPoP header for the backend when forwardProof is on.
 func TestForwardProofKeepsHeader(t *testing.T) {
 	p := newTestPolicy(t, map[string]interface{}{"forwardProof": true})
 	key := newKey(t, "ES256")
@@ -328,6 +340,7 @@ func TestForwardProofKeepsHeader(t *testing.T) {
 	}
 }
 
+// TestOpaqueTokenBindingFromProperties reads cnf.jkt from the JSON opaque-token-auth records.
 func TestOpaqueTokenBindingFromProperties(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	key := newKey(t, "ES256")
@@ -349,6 +362,7 @@ func TestStringCNFIsNotABinding(t *testing.T) {
 	expectRejected(t, run(p, req), "invalid_token")
 }
 
+// TestBindingFoundBelowNewerAuthLayer finds cnf.jkt below a newer auth layer, such as mtls-auth.
 func TestBindingFoundBelowNewerAuthLayer(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	key := newKey(t, "ES256")
@@ -357,6 +371,7 @@ func TestBindingFoundBelowNewerAuthLayer(t *testing.T) {
 	expectAllowed(t, run(p, req))
 }
 
+// TestSchemeIsCaseInsensitive accepts the DPoP scheme in any case, as RFC 9110 requires.
 func TestSchemeIsCaseInsensitive(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	key := newKey(t, "ES256")
@@ -366,6 +381,7 @@ func TestSchemeIsCaseInsensitive(t *testing.T) {
 
 // ─── htu matching ────────────────────────────────────────────────────────────
 
+// TestHTUNormalization matches htu after RFC 3986 normalization and refuses other origins and paths.
 func TestHTUNormalization(t *testing.T) {
 	cases := []struct {
 		name string
@@ -401,6 +417,7 @@ func TestHTUNormalization(t *testing.T) {
 	}
 }
 
+// TestHTUOriginsBehindLoadBalancer accepts the configured public origins instead of the request's own.
 func TestHTUOriginsBehindLoadBalancer(t *testing.T) {
 	p := newTestPolicy(t, map[string]interface{}{"htuOrigins": []interface{}{"https://api.example.com", "https://API.example.org:443/"}})
 	key := newKey(t, "ES256")
@@ -420,6 +437,7 @@ func TestHTUOriginsBehindLoadBalancer(t *testing.T) {
 	}))), "invalid_dpop_proof")
 }
 
+// TestRemoveDotSegments checks dot-segment removal against RFC 3986 examples.
 func TestRemoveDotSegments(t *testing.T) {
 	// Examples from RFC 3986 section 5.2.4 and 5.4.
 	cases := map[string]string{
@@ -446,6 +464,7 @@ func TestRemoveDotSegments(t *testing.T) {
 
 // ─── Rejected proofs ─────────────────────────────────────────────────────────
 
+// TestRejectedProofs refuses proofs with a missing, malformed or mismatching claim.
 func TestRejectedProofs(t *testing.T) {
 	type edit = func(jwt.MapClaims, map[string]interface{})
 	cases := []struct {
@@ -478,6 +497,7 @@ func TestRejectedProofs(t *testing.T) {
 	}
 }
 
+// TestClockSkewTolerance accepts iat within clockSkew on either side of the window.
 func TestClockSkewTolerance(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	key := newKey(t, "ES256")
@@ -487,6 +507,7 @@ func TestClockSkewTolerance(t *testing.T) {
 	}
 }
 
+// TestTamperedSignature refuses a proof whose payload was changed after signing.
 func TestTamperedSignature(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	key := newKey(t, "ES256")
@@ -502,6 +523,7 @@ func TestTamperedSignature(t *testing.T) {
 	expectRejected(t, run(p, req), "invalid_dpop_proof")
 }
 
+// TestProofSignedByAnotherKey refuses a valid proof from a key other than the token's cnf.jkt.
 func TestProofSignedByAnotherKey(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	bound := newKey(t, "ES256")
@@ -524,6 +546,7 @@ func TestJWKSubstitution(t *testing.T) {
 	expectRejected(t, run(p, dpopRequest(bound, proof)), "invalid_dpop_proof")
 }
 
+// TestRejectedAlgorithms refuses none, HMAC, algorithms outside allowedAlgorithms and curve mismatches.
 func TestRejectedAlgorithms(t *testing.T) {
 	key := newKey(t, "ES256")
 	t.Run("none", func(t *testing.T) {
@@ -567,6 +590,7 @@ func TestRejectedAlgorithms(t *testing.T) {
 	})
 }
 
+// TestPrivateKeyInJWK refuses a proof whose jwk carries private key material.
 func TestPrivateKeyInJWK(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	key := newKey(t, "ES256")
@@ -586,6 +610,7 @@ func TestPrivateKeyInJWK(t *testing.T) {
 	expectRejected(t, run(p, dpopRequest(key, proof)), "invalid_dpop_proof")
 }
 
+// TestJWKValidation refuses off-curve points, weak RSA keys and malformed JWKs.
 func TestJWKValidation(t *testing.T) {
 	ec := newKey(t, "ES256")
 	small, err := rsa.GenerateKey(rand.Reader, 1024)
@@ -615,6 +640,7 @@ func TestJWKValidation(t *testing.T) {
 	}
 }
 
+// TestReplayRejected refuses a proof the second time it is sent.
 func TestReplayRejected(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	key := newKey(t, "ES256")
@@ -623,6 +649,7 @@ func TestReplayRejected(t *testing.T) {
 	expectRejected(t, run(p, dpopRequest(key, proof)), "invalid_dpop_proof")
 }
 
+// TestConcurrentReplayAcceptsOnce accepts exactly one of many concurrent copies of a proof.
 func TestConcurrentReplayAcceptsOnce(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	key := newKey(t, "ES256")
@@ -647,6 +674,7 @@ func TestConcurrentReplayAcceptsOnce(t *testing.T) {
 	}
 }
 
+// TestRejectedProofDoesNotBurnJTI leaves a refused proof's jti unrecorded, so it cannot be used up by a failed attempt.
 func TestRejectedProofDoesNotBurnJTI(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	key := newKey(t, "ES256")
@@ -661,6 +689,7 @@ func TestRejectedProofDoesNotBurnJTI(t *testing.T) {
 
 // ─── Headers and scheme ──────────────────────────────────────────────────────
 
+// TestDPoPHeaderCount refuses a missing, empty, repeated or comma-folded DPoP header.
 func TestDPoPHeaderCount(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	key := newKey(t, "ES256")
@@ -679,12 +708,14 @@ func TestDPoPHeaderCount(t *testing.T) {
 	}
 }
 
+// TestOversizedProof refuses a proof over 8 KB before parsing it.
 func TestOversizedProof(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	key := newKey(t, "ES256")
 	expectRejected(t, run(p, dpopRequest(key, strings.Repeat("a", maxProofLength+1))), "invalid_dpop_proof")
 }
 
+// TestBoundTokenAsBearerIsRejectedInBothModes refuses a DPoP-bound token sent with the Bearer scheme in either mode.
 func TestBoundTokenAsBearerIsRejectedInBothModes(t *testing.T) {
 	for _, mode := range []string{modeRequired, modeOptional} {
 		t.Run(mode, func(t *testing.T) {
@@ -696,6 +727,7 @@ func TestBoundTokenAsBearerIsRejectedInBothModes(t *testing.T) {
 	}
 }
 
+// TestUnboundBearerToken refuses an unbound bearer token in required mode and lets it through in optional mode.
 func TestUnboundBearerToken(t *testing.T) {
 	t.Run("required", func(t *testing.T) {
 		p := newTestPolicy(t, nil)
@@ -720,6 +752,7 @@ func TestUnboundBearerToken(t *testing.T) {
 	})
 }
 
+// TestDPoPSchemeWithUnboundToken refuses the DPoP scheme on a token without cnf.jkt.
 func TestDPoPSchemeWithUnboundToken(t *testing.T) {
 	for _, mode := range []string{modeRequired, modeOptional} {
 		p := newTestPolicy(t, map[string]interface{}{"mode": mode})
@@ -732,6 +765,7 @@ func TestDPoPSchemeWithUnboundToken(t *testing.T) {
 	}
 }
 
+// TestMTLSBoundTokenIsNotDPoPBound treats a cnf without jkt (x5t#S256) as not DPoP-bound.
 func TestMTLSBoundTokenIsNotDPoPBound(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	key := newKey(t, "ES256")
@@ -741,6 +775,7 @@ func TestMTLSBoundTokenIsNotDPoPBound(t *testing.T) {
 	expectRejected(t, run(p, req), "invalid_token")
 }
 
+// TestNoAuthenticatedToken refuses a request no access-token policy authenticated.
 func TestNoAuthenticatedToken(t *testing.T) {
 	p := newTestPolicy(t, map[string]interface{}{"mode": modeOptional})
 	key := newKey(t, "ES256")
@@ -755,6 +790,7 @@ func TestNoAuthenticatedToken(t *testing.T) {
 	}
 }
 
+// TestMalformedAuthorization refuses a DPoP Authorization header with no token or extra parts.
 func TestMalformedAuthorization(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	key := newKey(t, "ES256")
@@ -766,6 +802,7 @@ func TestMalformedAuthorization(t *testing.T) {
 
 // ─── Failure response ────────────────────────────────────────────────────────
 
+// TestFailureResponse checks the challenge, the OAuth error body and the AuthContext failure layer.
 func TestFailureResponse(t *testing.T) {
 	key := newKey(t, "ES256")
 	p := newTestPolicy(t, map[string]interface{}{"allowedAlgorithms": []interface{}{"ES256", "EdDSA"}})
@@ -844,6 +881,7 @@ func TestFailureDescriptions(t *testing.T) {
 
 // ─── Nonces ──────────────────────────────────────────────────────────────────
 
+// TestNonceFlow walks the use_dpop_nonce challenge, retry, rotation, forged and expired nonces, and a second replica.
 func TestNonceFlow(t *testing.T) {
 	p := newTestPolicy(t, map[string]interface{}{"requireNonce": true, "nonceSecret": "test-secret-test-secret-test-secret"})
 	key := newKey(t, "ES256")
@@ -904,6 +942,7 @@ func TestNonceFlow(t *testing.T) {
 	expectAllowed(t, run(replica, dpopRequest(key, key.sign(t, withNonce(p.nonces.issue(testNow))))))
 }
 
+// TestNoResponseNonceForUnverifiedRequest sends no nonce on responses to requests the policy did not verify.
 func TestNoResponseNonceForUnverifiedRequest(t *testing.T) {
 	p := newTestPolicy(t, map[string]interface{}{"requireNonce": true})
 	respCtx := &policy.ResponseHeaderContext{SharedContext: &policy.SharedContext{Metadata: map[string]interface{}{}}}
@@ -913,6 +952,7 @@ func TestNoResponseNonceForUnverifiedRequest(t *testing.T) {
 	}
 }
 
+// TestNonceValidity checks nonce age limits, clock skew between replicas and the key.
 func TestNonceValidity(t *testing.T) {
 	n := newNonceIssuer("s")
 	lifetime, skew := 5*time.Minute, 30*time.Second
@@ -934,6 +974,7 @@ func TestNonceValidity(t *testing.T) {
 	}
 }
 
+// TestModeWithoutNonce skips the response phase when nonces are off.
 func TestModeWithoutNonce(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	m := p.Mode()
@@ -945,6 +986,7 @@ func TestModeWithoutNonce(t *testing.T) {
 
 // ─── Replay store ────────────────────────────────────────────────────────────
 
+// TestReplayStore checks expiry, and that a full store refuses new entries instead of evicting live ones.
 func TestReplayStore(t *testing.T) {
 	key := func(s string) [32]byte { return replayKey("jkt", s) }
 	s := newReplayStore(2)
@@ -998,6 +1040,7 @@ func TestReplayCacheFullFailsClosed(t *testing.T) {
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
+// TestConfigValidation refuses unusable parameter values at deployment.
 func TestConfigValidation(t *testing.T) {
 	bad := []map[string]interface{}{
 		{"mode": "strict"},
@@ -1026,6 +1069,7 @@ func TestConfigValidation(t *testing.T) {
 	}
 }
 
+// TestConfigDefaults checks the defaults applied when no parameters are set.
 func TestConfigDefaults(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	c := p.cfg
@@ -1038,6 +1082,7 @@ func TestConfigDefaults(t *testing.T) {
 	}
 }
 
+// TestConfigNormalizesOrigins normalizes htuOrigins entries, including IPv6 hosts.
 func TestConfigNormalizesOrigins(t *testing.T) {
 	p := newTestPolicy(t, map[string]interface{}{"htuOrigins": []interface{}{"HTTPS://Api.Example.com:443", "http://[::1]:8080/"}})
 	want := []string{"https://api.example.com", "http://[::1]:8080"}
@@ -1048,6 +1093,7 @@ func TestConfigNormalizesOrigins(t *testing.T) {
 
 // ─── Hardening from the competitive review ───────────────────────────────────
 
+// TestCritHeaderRejected refuses a proof with a crit header (RFC 7515 section 4.1.11).
 func TestCritHeaderRejected(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	key := newKey(t, "ES256")
@@ -1055,6 +1101,7 @@ func TestCritHeaderRejected(t *testing.T) {
 	expectRejected(t, run(p, dpopRequest(key, proof)), "invalid_dpop_proof")
 }
 
+// TestEd25519AlgorithmName accepts the RFC 9864 Ed25519 name and keeps it separate from EdDSA in allowedAlgorithms.
 func TestEd25519AlgorithmName(t *testing.T) {
 	key := newKey(t, "Ed25519")
 	expectAllowed(t, run(newTestPolicy(t, nil), dpopRequest(key, key.sign(t, nil))))
@@ -1066,6 +1113,7 @@ func TestEd25519AlgorithmName(t *testing.T) {
 	expectRejected(t, run(p, dpopRequest(ed, ed.sign(t, nil))), "invalid_dpop_proof")
 }
 
+// TestMultipleAuthorizationHeaders answers 400 invalid_request to repeated or folded Authorization headers.
 func TestMultipleAuthorizationHeaders(t *testing.T) {
 	p := newTestPolicy(t, map[string]interface{}{"mode": modeOptional})
 	key := newKey(t, "ES256")
@@ -1081,6 +1129,7 @@ func TestMultipleAuthorizationHeaders(t *testing.T) {
 	}
 }
 
+// TestBearerChallengeForBearerScheme reports a Bearer-scheme error in a Bearer challenge with DPoP algs.
 func TestBearerChallengeForBearerScheme(t *testing.T) {
 	p := newTestPolicy(t, map[string]interface{}{"allowedAlgorithms": []interface{}{"ES256"}})
 	key := newKey(t, "ES256")
@@ -1092,6 +1141,7 @@ func TestBearerChallengeForBearerScheme(t *testing.T) {
 	}
 }
 
+// TestMalformedBindingIsRefused refuses a cnf it cannot read reliably, even in optional mode.
 func TestMalformedBindingIsRefused(t *testing.T) {
 	key := newKey(t, "ES256")
 	cases := map[string]*policy.AuthContext{
@@ -1112,6 +1162,7 @@ func TestMalformedBindingIsRefused(t *testing.T) {
 	}
 }
 
+// TestOpaqueTokenTypeDPoPWithBinding accepts an introspected DPoP token that carries cnf.jkt.
 func TestOpaqueTokenTypeDPoPWithBinding(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	key := newKey(t, "ES256")
@@ -1122,6 +1173,7 @@ func TestOpaqueTokenTypeDPoPWithBinding(t *testing.T) {
 	expectAllowed(t, run(p, req))
 }
 
+// TestNonASCIIHostRefused refuses Unicode hosts and normalizes punycode, IPv6 and empty ports.
 func TestNonASCIIHostRefused(t *testing.T) {
 	if _, err := normalizeOrigin("https", "bücher.example"); err == nil {
 		t.Error("Unicode host accepted")

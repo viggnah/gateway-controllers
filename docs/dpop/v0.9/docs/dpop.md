@@ -25,7 +25,7 @@ The policy checks the proof and the binding. The access token itself is validate
 
 1. **Issue DPoP-bound tokens.** Configure the authorization server to bind access tokens to DPoP. For example, in WSO2 Identity Server select **DPoP** as the application's token binding type; in Keycloak turn on **Require DPoP bound tokens** for the client. The tokens then carry `cnf.jkt`.
 
-2. **Attach the policies.** JWT Auth validates the token, then DPoP checks the proof. A DPoP client sends `Authorization: DPoP <token>`, so set JWT Auth's `authHeaderPrefix` to `DPoP`. The DPoP policy needs no parameters.
+2. **Attach the policies.** JWT Auth validates the token, then DPoP checks the proof. A DPoP client sends `Authorization: DPoP <token>`, so set JWT Auth's `authHeaderPrefix` to `DPoP`, and leave its `headerName` at the default, `Authorization`. The DPoP policy needs no parameters.
 
    ```yaml
    apiVersion: gateway.api-platform.wso2.com/v1
@@ -100,7 +100,7 @@ A value the policy cannot use, such as an unknown algorithm or an `htuOrigins` e
 | `replaycachemaxsize` | `100000` | Proof identifiers each replica's in-memory cache can hold, across all APIs. Entries are never dropped before they expire; while the cache is full, DPoP requests are refused with `503`. About 150 bytes each, so the default uses about 15 MB. |
 | `replay_store` | `"memory"` | `memory`: each replica remembers the proofs it accepted. `redis`: every replica shares one record, so a proof is accepted once across the deployment. |
 | `[…dpop_v0.redis]` | | Used when `replay_store = "redis"`. Same keys as the rate-limit policies' Redis block: `host` (`localhost`), `port` (`6379`), `username`, `password`, `db` (`0`), `key_prefix` (`"dpop:v0:"`), `failure_mode` (`"closed"`), `connection_timeout` (`"5s"`), `read_timeout` (`"1s"`), `write_timeout` (`"1s"`), `pool_size` (`0` = go-redis default), and `[…dpop_v0.redis.tls]` with `enabled`, `ca_file`, `server_name`, `insecure_skip_verify`, `cert_file`, `key_file`. |
-| `redis.failure_mode` | `"closed"` | While Redis is unreachable: `closed` refuses DPoP requests with `503`, so no proof is accepted unrecorded; `local` falls back to the replica's in-memory cache, which keeps serving and still stops replays to the same replica. |
+| `redis.failure_mode` | `"closed"` | While Redis is unreachable: `closed` refuses DPoP requests with `503`, so no proof is accepted unrecorded; `local` keeps serving: each replica also records every proof it accepts in its own memory, and relies on that record alone while Redis is down, so replays to the same replica are still refused, before, during and after an outage. |
 
 #### Sample System Configuration
 
@@ -238,7 +238,7 @@ password = '{{ env "APIP_GW_DPOP_REDIS_PASSWORD" }}'
 - **One command per verified proof.** `SET key NX PX <ttl>` is atomic, so of two copies of a proof sent to different replicas at the same moment, exactly one is accepted. Keys expire on their own, after `proofMaxAge` plus `clockskew` (90 seconds by default). Memory used is about 200 bytes × DPoP requests per second × 90 seconds.
 - **Use an HA Redis endpoint.** The policy connects to one endpoint: a managed service's primary endpoint (Amazon ElastiCache or MemoryDB, Azure Cache for Redis, Google Memorystore) or a Redis behind a proxy. Redis Sentinel and Cluster protocols are not supported. You can share the Redis the rate-limit policies use; give each gateway deployment its own `key_prefix`.
 - **Set `maxmemory-policy noeviction`** (or use a dedicated instance). A Redis that evicts keys to free memory could forget a live proof, which would make it replayable. With `noeviction`, a full Redis refuses writes and the policy follows `failure_mode`.
-- **Choose `failure_mode`.** `closed` (default) refuses DPoP requests with `503` while Redis is unreachable. `local` keeps serving, falling back to per-replica protection, and is the choice when availability matters more than cross-replica replay protection. Either way the gateway logs `dpop: cannot record proof identifiers in Redis` (at most once a minute per replica); alert on it.
+- **Choose `failure_mode`.** `closed` (default) refuses DPoP requests with `503` while Redis is unreachable. `local` keeps serving, falling back to per-replica protection, and is the choice when availability matters more than cross-replica replay protection. In `local` mode each replica also records every proof it accepts in its own memory (bounded by `replaycachemaxsize`), so its history survives the switch to and from Redis. Either way the gateway logs `dpop: cannot record proof identifiers in Redis` (at most once a minute per replica); alert on it.
 - **Failover.** Redis replicates asynchronously; a proof recorded just before a failover may be lost, and could be accepted once more within its lifetime.
 - **TLS.** Set `[…dpop_v0.redis.tls] enabled = true`; leave `ca_file` empty for managed services with public CAs. Certificate files must be mounted in the runtime container.
 
@@ -333,6 +333,7 @@ A refusal from the access-token policy before the DPoP policy, such as an expire
 - **Per-replica replay detection** (the `memory` store) allows a captured proof to be used once per replica within `proofMaxAge`; use Redis to close that, or keep `proofMaxAge` short.
 - **Use HTTPS.** A proof does not protect the request body or the response (RFC 9449 section 11.7).
 - **Keep access tokens short-lived.** Without nonces, a client whose key is stolen can pre-generate proofs (RFC 9449 section 11.2).
+- **The token must arrive in `Authorization`.** RFC 9449 carries a DPoP-bound token there, and the policy checks `ath` against that header. Keep the access-token policy's `headerName` at its default, `Authorization`, so both policies judge the same token.
 - **What the backend receives.** The DPoP policy removes the `DPoP` header and leaves `Authorization` to the access-token policy's forwarding options; for example, JWT Auth's `forwardTokenStripScheme: true` forwards the bare token.
 - **Long-lived connections.** The proof is checked when a request starts; a streamed response or a WebSocket stays open past the proof's lifetime.
 - **Analytics.** The access-token policy's authentication context is kept; the DPoP policy adds a layer of type `dpop` only when it refuses a request.

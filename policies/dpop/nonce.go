@@ -61,6 +61,7 @@ func newNonceIssuer(secret string) *nonceIssuer {
 	return &nonceIssuer{key: processNonceKey}
 }
 
+// mac returns the truncated HMAC-SHA256 of an issue time under the nonce key.
 func (n *nonceIssuer) mac(issued []byte) []byte {
 	m := hmac.New(sha256.New, n.key)
 	m.Write([]byte(nonceContext))

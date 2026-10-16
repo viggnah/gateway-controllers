@@ -60,8 +60,10 @@ var b64 = base64.RawURLEncoding.Strict()
 // allowedAlgorithms lists it, and other policies keep their own allowlists.
 type ed25519Alg struct{ *jwt.SigningMethodEd25519 }
 
+// Alg returns the algorithm name a proof header must carry to select this method.
 func (ed25519Alg) Alg() string { return "Ed25519" }
 
+// init registers "Ed25519" with golang-jwt so proofs that use the RFC 9864 name can be parsed.
 func init() {
 	jwt.RegisterSigningMethod("Ed25519", func() jwt.SigningMethod { return ed25519Alg{jwt.SigningMethodEdDSA} })
 }
@@ -82,6 +84,7 @@ type htuTarget struct {
 // reaches the debug log.
 type headerErr struct{ desc, detail string }
 
+// Error returns the client-safe description.
 func (e *headerErr) Error() string { return e.desc }
 
 // verifiedProof is what a successful verification reports to the caller.
@@ -271,6 +274,7 @@ func parseJWK(jwk map[string]interface{}, alg string) (crypto.PublicKey, string,
 	}
 }
 
+// parseECJWK builds an ECDSA key from an EC jwk whose curve matches alg, rejecting points not on the curve.
 func parseECJWK(jwk map[string]interface{}, alg string) (crypto.PublicKey, string, error) {
 	var curve elliptic.Curve
 	var wantCrv string
@@ -308,6 +312,7 @@ func parseECJWK(jwk map[string]interface{}, alg string) (crypto.PublicKey, strin
 	return key, tp, err
 }
 
+// parseRSAJWK builds an RSA key from an RSA jwk of 2048 to 8192 bits with an odd public exponent.
 func parseRSAJWK(jwk map[string]interface{}, alg string) (crypto.PublicKey, string, error) {
 	if !strings.HasPrefix(alg, "RS") && !strings.HasPrefix(alg, "PS") {
 		return nil, "", fmt.Errorf("RSA key cannot be used with %s", alg)
@@ -332,6 +337,7 @@ func parseRSAJWK(jwk map[string]interface{}, alg string) (crypto.PublicKey, stri
 	return key, tp, err
 }
 
+// parseOKPJWK builds an Ed25519 key from an OKP jwk, for the EdDSA and Ed25519 algorithms.
 func parseOKPJWK(jwk map[string]interface{}, alg string) (crypto.PublicKey, string, error) {
 	if alg != "EdDSA" && alg != "Ed25519" {
 		return nil, "", fmt.Errorf("OKP key cannot be used with %s", alg)
@@ -488,10 +494,12 @@ func removeDotSegments(in string) string {
 	return out.String()
 }
 
+// isHex reports whether c is a hexadecimal digit.
 func isHex(c byte) bool {
 	return ('0' <= c && c <= '9') || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F')
 }
 
+// unhex returns the value of the hexadecimal digit c.
 func unhex(c byte) byte {
 	switch {
 	case '0' <= c && c <= '9':
@@ -503,6 +511,7 @@ func unhex(c byte) byte {
 	}
 }
 
+// upper uppercases a hexadecimal letter, leaving digits unchanged.
 func upper(c byte) byte {
 	if 'a' <= c && c <= 'f' {
 		return c - 'a' + 'A'
@@ -510,6 +519,7 @@ func upper(c byte) byte {
 	return c
 }
 
+// isUnreserved reports whether c is an RFC 3986 unreserved character, which percent-encoding never needs.
 func isUnreserved(c byte) bool {
 	return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || ('0' <= c && c <= '9') ||
 		c == '-' || c == '.' || c == '_' || c == '~'

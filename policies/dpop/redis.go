@@ -38,8 +38,8 @@ const (
 	replayStoreRedis  = "redis"
 
 	// redisFailureClosed refuses DPoP requests while Redis cannot be reached;
-	// redisFailureLocal falls back to this replica's in-memory store, which still
-	// stops replays to the same replica.
+	// redisFailureLocal also records every proof in this replica's memory, and
+	// relies on that record alone while Redis cannot be reached.
 	redisFailureClosed = "closed"
 	redisFailureLocal  = "local"
 )
@@ -69,13 +69,26 @@ type redisReplayStore struct {
 	warned time.Time
 }
 
+// checkAndStore records the proof key in Redis with SET NX and an expiry, following failureMode when Redis fails.
 func (r *redisReplayStore) checkAndStore(ctx context.Context, key [32]byte, expiry, now time.Time) replayResult {
+	// In local mode the replica also keeps its own record of every proof it accepts,
+	// whether Redis is up or not, so its history stays continuous: a proof accepted
+	// before an outage is still refused during it, and one accepted during an
+	// outage is still refused after Redis returns.
+	localResult := replayStored
+	if r.failureMode == redisFailureLocal {
+		if localResult = r.local.checkAndStore(ctx, key, expiry, now); localResult == replaySeen {
+			return replaySeen
+		}
+	}
+
 	ttl := expiry.Sub(now)
 	if ttl < time.Millisecond {
 		ttl = time.Millisecond
 	}
 	stored, err := r.client.SetNX(ctx, r.prefix+hex.EncodeToString(key[:]), 1, ttl).Result()
 	if err == nil {
+		// Redis is the authority while it answers; a full local record is not fatal.
 		if stored {
 			return replayStored
 		}
@@ -83,11 +96,12 @@ func (r *redisReplayStore) checkAndStore(ctx context.Context, key [32]byte, expi
 	}
 	r.warnUnavailable(err, now)
 	if r.failureMode == redisFailureLocal {
-		return r.local.checkAndStore(ctx, key, expiry, now)
+		return localResult
 	}
 	return replayUnavailable
 }
 
+// warnUnavailable logs a Redis failure at most once a minute, so an outage does not flood the log.
 func (r *redisReplayStore) warnUnavailable(err error, now time.Time) {
 	r.warnMu.Lock()
 	defer r.warnMu.Unlock()
@@ -153,6 +167,7 @@ func newReplayChecker(params map[string]interface{}, maxSize int) (replayChecker
 	return &redisReplayStore{client: client, prefix: rc.keyPrefix, failureMode: rc.failureMode, local: local}, nil
 }
 
+// parseRedisConfig reads the redis system parameters, applying the documented defaults.
 func parseRedisConfig(raw map[string]interface{}) (redisConfig, error) {
 	if raw == nil {
 		raw = map[string]interface{}{}

@@ -39,8 +39,10 @@ type fakeRedis struct {
 	down bool
 }
 
+// newFakeRedis returns an empty, reachable fake.
 func newFakeRedis() *fakeRedis { return &fakeRedis{ttls: map[string]time.Duration{}} }
 
+// SetNX stores key if absent, recording its TTL, as SET key value NX PX ttl does.
 func (f *fakeRedis) SetNX(_ context.Context, key string, _ interface{}, ttl time.Duration) *redis.BoolCmd {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -62,6 +64,7 @@ func replicaWithRedis(t *testing.T, r setNXer, failureMode string) *DPoPPolicy {
 	return p
 }
 
+// TestRedisReplayAcrossReplicas refuses on one replica a proof another replica accepted.
 func TestRedisReplayAcrossReplicas(t *testing.T) {
 	r := newFakeRedis()
 	a, b := replicaWithRedis(t, r, redisFailureClosed), replicaWithRedis(t, r, redisFailureClosed)
@@ -85,6 +88,7 @@ func TestRedisReplayAcrossReplicas(t *testing.T) {
 	}
 }
 
+// TestRedisConcurrentReplayAcrossReplicas accepts exactly one copy of a proof sent to several replicas at once.
 func TestRedisConcurrentReplayAcrossReplicas(t *testing.T) {
 	r := newFakeRedis()
 	replicas := []*DPoPPolicy{replicaWithRedis(t, r, redisFailureClosed), replicaWithRedis(t, r, redisFailureClosed), replicaWithRedis(t, r, redisFailureClosed)}
@@ -110,6 +114,7 @@ func TestRedisConcurrentReplayAcrossReplicas(t *testing.T) {
 	}
 }
 
+// TestRedisUnavailableFailsClosed answers 503 while Redis is down in closed mode.
 func TestRedisUnavailableFailsClosed(t *testing.T) {
 	r := newFakeRedis()
 	r.down = true
@@ -121,6 +126,7 @@ func TestRedisUnavailableFailsClosed(t *testing.T) {
 	}
 }
 
+// TestRedisUnavailableFallsBackToLocal keeps serving, and refusing replays, while Redis is down in local mode.
 func TestRedisUnavailableFallsBackToLocal(t *testing.T) {
 	r := newFakeRedis()
 	r.down = true
@@ -130,6 +136,37 @@ func TestRedisUnavailableFallsBackToLocal(t *testing.T) {
 	expectAllowed(t, run(p, dpopRequest(key, proof)))
 	// The replica's own store still refuses the replay.
 	expectRejected(t, run(p, dpopRequest(key, proof)), "invalid_dpop_proof")
+}
+
+// TestRedisLocalFallbackKeepsHistory crosses Redis outages in local mode: a proof
+// accepted while Redis is up is refused during an outage on the same replica, and a
+// proof accepted during an outage is refused after Redis recovers.
+func TestRedisLocalFallbackKeepsHistory(t *testing.T) {
+	r := newFakeRedis()
+	p := replicaWithRedis(t, r, redisFailureLocal)
+	key := newKey(t, "ES256")
+
+	before := key.sign(t, nil)
+	expectAllowed(t, run(p, dpopRequest(key, before)))
+	r.down = true
+	expectRejected(t, run(p, dpopRequest(key, before)), "invalid_dpop_proof")
+
+	during := key.sign(t, nil)
+	expectAllowed(t, run(p, dpopRequest(key, during)))
+	r.down = false
+	expectRejected(t, run(p, dpopRequest(key, during)), "invalid_dpop_proof")
+}
+
+// TestRedisClosedModeKeepsNoLocalRecord checks that the default mode leaves the
+// replica's memory alone: Redis is the only record.
+func TestRedisClosedModeKeepsNoLocalRecord(t *testing.T) {
+	r := newFakeRedis()
+	p := replicaWithRedis(t, r, redisFailureClosed)
+	key := newKey(t, "ES256")
+	expectAllowed(t, run(p, dpopRequest(key, key.sign(t, nil))))
+	if n := p.replay.(*redisReplayStore).local.size(); n != 0 {
+		t.Errorf("closed mode recorded %d proofs locally, want 0", n)
+	}
 }
 
 // TestRedisConfiguredThroughParams builds the store from system parameters with the
@@ -162,6 +199,7 @@ func TestRedisConfiguredThroughParams(t *testing.T) {
 	}
 }
 
+// TestRedisConfigValidation refuses unusable Redis settings and defaults to the memory store.
 func TestRedisConfigValidation(t *testing.T) {
 	bad := []map[string]interface{}{
 		{"replayStore": "memcached"},

@@ -429,18 +429,22 @@ func errInvalidProofDetail(description, detail string) *dpopError {
 	return &dpopError{status: 401, code: "invalid_dpop_proof", description: description, reason: reason}
 }
 
+// errInvalidToken refuses the access token itself (RFC 6750 invalid_token), in a DPoP challenge.
 func errInvalidToken(reason, description string) *dpopError {
 	return &dpopError{status: 401, code: "invalid_token", description: description, reason: reason}
 }
 
+// errBearer refuses a credential sent with the Bearer scheme; the error goes in a Bearer challenge.
 func errBearer(reason, description string) *dpopError {
 	return &dpopError{status: 401, code: "invalid_token", description: description, reason: reason, bearer: true}
 }
 
+// errUseNonce asks the client to retry with the nonce sent in DPoP-Nonce (RFC 9449 section 9).
 func errUseNonce(reason string) *dpopError {
 	return &dpopError{status: 401, code: "use_dpop_nonce", description: "resource server requires nonce in DPoP proof", reason: reason}
 }
 
+// errInvalidRequest refuses a request that carries more than one Authorization credential (400).
 func errInvalidRequest(reason string) *dpopError {
 	return &dpopError{status: 400, code: "invalid_request", description: "multiple methods used to include access token", reason: reason}
 }
@@ -564,6 +568,7 @@ func parseConfig(params map[string]interface{}) (config, error) {
 	return cfg, nil
 }
 
+// isSupportedAlgorithm reports whether alg is one of the asymmetric algorithms the policy can verify.
 func isSupportedAlgorithm(alg string) bool {
 	for _, a := range supportedAlgorithms {
 		if a == alg {
@@ -589,6 +594,7 @@ func parseConfiguredOrigin(raw string) (string, error) {
 	return normalizeOrigin(u.Scheme, u.Host)
 }
 
+// stringParam reads a string parameter, returning def when it is absent and an error when it has another type.
 func stringParam(params map[string]interface{}, key, def string) (string, error) {
 	v, ok := params[key]
 	if !ok || v == nil {
@@ -601,6 +607,7 @@ func stringParam(params map[string]interface{}, key, def string) (string, error)
 	return s, nil
 }
 
+// boolParam reads a boolean parameter, returning def when it is absent.
 func boolParam(params map[string]interface{}, key string, def bool) (bool, error) {
 	v, ok := params[key]
 	if !ok || v == nil {
@@ -613,6 +620,7 @@ func boolParam(params map[string]interface{}, key string, def bool) (bool, error
 	return b, nil
 }
 
+// intParam reads an integer parameter, which arrives as a JSON number (float64), returning def when it is absent.
 func intParam(params map[string]interface{}, key string, def int) (int, error) {
 	v, ok := params[key]
 	if !ok || v == nil {
@@ -633,6 +641,7 @@ func intParam(params map[string]interface{}, key string, def int) (int, error) {
 	}
 }
 
+// durationParam reads a positive Go duration string (e.g. "60s"), returning def when it is absent or empty.
 func durationParam(params map[string]interface{}, key string, def time.Duration) (time.Duration, error) {
 	s, err := stringParam(params, key, "")
 	if err != nil {
@@ -651,6 +660,7 @@ func durationParam(params map[string]interface{}, key string, def time.Duration)
 	return d, nil
 }
 
+// stringListParam reads a list of strings, returning def when it is absent.
 func stringListParam(params map[string]interface{}, key string, def []string) ([]string, error) {
 	v, ok := params[key]
 	if !ok || v == nil {
