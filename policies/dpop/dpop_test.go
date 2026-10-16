@@ -571,8 +571,10 @@ func TestPrivateKeyInJWK(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	key := newKey(t, "ES256")
 	priv := key.signer.(*ecdsa.PrivateKey)
-	d := make([]byte, 32)
-	priv.D.FillBytes(d)
+	d, err := priv.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
 	proof := key.sign(t, func(_ jwt.MapClaims, h map[string]interface{}) {
 		jwk := map[string]interface{}{}
 		for k, v := range key.jwk {

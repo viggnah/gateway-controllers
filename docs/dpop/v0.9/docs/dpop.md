@@ -291,7 +291,7 @@ Proofs are 0.5 to 3 KB; the default header limits of common load balancers and i
 
 ### Clocks
 
-Proof age is judged against the gateway's clock, with `clockskew` (30 seconds) tolerance. Run NTP on every node; managed Kubernetes services (EKS, AKS, GKE) and OpenShift do so by default. If clients have unreliable clocks (mobile devices, browsers), turn on `requireNonce`: the nonce then proves freshness by the gateway's clock.
+Proof age is judged by comparing the client's `iat` with the gateway's clock, with `clockskew` (30 seconds) tolerance, so both clocks must be right. Run NTP on every gateway node; managed Kubernetes services (EKS, AKS, GKE) and OpenShift do so by default. Clients must keep their clocks synchronized too: a client whose clock is off by more than `clockskew` is refused with `iat is in the future` or `proof has expired (iat is too old)`. `requireNonce` adds a second freshness check by the gateway's clock; it does not replace the `iat` check, so it does not help a client with a wrong clock.
 
 ### Sizing
 
@@ -315,7 +315,7 @@ Each refusal names the check that failed in `error_description`, in both the `WW
 | 401 `invalid_dpop_proof` | `jti is missing or longer than 512 characters`, `htm or htu is missing`, `iat is missing or not a number`, `ath is missing` | Include every required claim. |
 | 401 `invalid_dpop_proof` | `htm does not match the request method` | Set `htm` to the request's method, in upper case. |
 | 401 `invalid_dpop_proof` | `htu does not match the request URI` | Set `htu` to the URL called, without query. Behind a load balancer that terminates TLS, set `htuOrigins` (see [Load Balancers](#load-balancers-ingress-and-htu)). |
-| 401 `invalid_dpop_proof` | `iat is in the future`, `proof has expired (iat is too old)` | Create a new proof for every request, with `iat` set to now. Check the client's clock, or use `requireNonce`. |
+| 401 `invalid_dpop_proof` | `iat is in the future`, `proof has expired (iat is too old)` | Create a new proof for every request, with `iat` set to now. Synchronize the client's clock (NTP); the gateway allows `clockskew` (30 seconds) of difference. |
 | 401 `invalid_dpop_proof` | `ath does not match the access token` | Hash the exact access token sent in `Authorization`. |
 | 401 `invalid_dpop_proof` | `proof has already been used` | Create a new proof, with a new `jti`, for every request, including retries. |
 | 401 `use_dpop_nonce` | `resource server requires nonce in DPoP proof` | Retry with a new proof whose `nonce` is the `DPoP-Nonce` from the response. |

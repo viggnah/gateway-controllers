@@ -55,8 +55,9 @@ parameters:
         If true, every proof must carry a nonce issued by the gateway. A proof
         without a valid nonce is answered with 401, error="use_dpop_nonce" and a
         fresh nonce in the DPoP-Nonce header, and the response to a request whose
-        nonce is past half its lifetime carries the next nonce. Bounds the lifetime of a proof with a server clock rather
-        than the client's iat.
+        nonce is past half its lifetime carries the next nonce. Adds a freshness
+        check by the gateway's clock on top of the iat check, which still applies,
+        so client clocks must stay synchronized.
       default: false
 
     htuOrigins:
