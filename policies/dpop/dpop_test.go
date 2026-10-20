@@ -19,6 +19,7 @@
 package dpop
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -28,6 +29,7 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
 	"math/big"
 	"strings"
 	"sync"
@@ -1186,5 +1188,77 @@ func TestNonASCIIHostRefused(t *testing.T) {
 	}
 	if got, _ := normalizeOrigin("https", "api.example.com:"); got != "https://api.example.com" {
 		t.Errorf("empty port = %q", got)
+	}
+}
+
+// TestOnlyAccessTokenLayersCount checks that layers from policies that do not
+// validate an access token neither satisfy the policy nor supply a binding: the
+// gateway's own backend credentials (oauth2-generator), and client credentials
+// without a token (api-key-auth), even when such a layer carries a cnf property.
+func TestOnlyAccessTokenLayersCount(t *testing.T) {
+	victim, attacker := newKey(t, "ES256"), newKey(t, "ES256")
+	planted := map[string]string{"cnf": `{"jkt":"` + attacker.jkt + `"}`}
+	cases := map[string]*policy.AuthContext{
+		"backend credentials only": {Authenticated: true, AuthType: "oauth2"},
+		"api key only":             {Authenticated: true, AuthType: "apikey", Properties: planted},
+	}
+	for name, auth := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := newTestPolicy(t, map[string]interface{}{"mode": modeOptional})
+			for _, authz := range []string{"Bearer " + testToken, "DPoP " + testToken} {
+				req := newRequest(reqOpts{auth: auth, authz: []string{authz}, proofs: []string{attacker.sign(t, nil)}})
+				resp := expectRejected(t, run(p, req), "invalid_token")
+				if !strings.Contains(resp.Headers[wwwAuthenticateHeader], "access token required") {
+					t.Errorf("challenge = %q", resp.Headers[wwwAuthenticateHeader])
+				}
+			}
+		})
+	}
+	t.Run("planted cnf above a real token", func(t *testing.T) {
+		p := newTestPolicy(t, nil)
+		auth := &policy.AuthContext{Authenticated: true, AuthType: "apikey", Properties: planted, Previous: boundJWT(victim.jkt)}
+		req := newRequest(reqOpts{auth: auth, authz: []string{"DPoP " + testToken}, proofs: []string{attacker.sign(t, nil)}})
+		expectRejected(t, run(p, req), "invalid_token")
+	})
+}
+
+// TestMCPAuthLayerCarriesBinding accepts the binding from mcp-auth, which validates
+// the token through jwt-auth and records its layer as mcp/oauth.
+func TestMCPAuthLayerCarriesBinding(t *testing.T) {
+	p := newTestPolicy(t, nil)
+	key := newKey(t, "ES256")
+	auth := boundJWT(key.jkt)
+	auth.AuthType = "mcp/oauth"
+	req := newRequest(reqOpts{auth: auth, authz: []string{"DPoP " + testToken}, proofs: []string{key.sign(t, nil)}})
+	expectAllowed(t, run(p, req))
+}
+
+// TestMisconfigurationWarningIsRateLimited logs the missing access-token policy once
+// a minute, not once per refused request, even when the engine builds several
+// instances of the policy for the same API.
+func TestMisconfigurationWarningIsRateLimited(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	warnLimiter.mu.Lock()
+	warnLimiter.last = make(map[string]time.Time)
+	warnLimiter.mu.Unlock()
+
+	now := testNow
+	instances := []*DPoPPolicy{newTestPolicy(t, nil), newTestPolicy(t, nil)}
+	for _, p := range instances {
+		p.now = func() time.Time { return now }
+	}
+	req := func() *policy.RequestHeaderContext {
+		return newRequest(reqOpts{authz: []string{"DPoP " + testToken}, proofs: []string{"x.y.z"}})
+	}
+	for i := 0; i < 6; i++ {
+		run(instances[i%2], req())
+	}
+	now = now.Add(61 * time.Second)
+	run(instances[0], req())
+	if n := strings.Count(buf.String(), "no access-token policy authenticated the request"); n != 2 {
+		t.Errorf("logged %d warnings for 7 requests over 61s on two instances, want 2:\n%s", n, buf.String())
 	}
 }

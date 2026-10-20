@@ -103,6 +103,14 @@ type DPoPPolicy struct {
 	now    func() time.Time
 }
 
+// accessTokenAuthTypes are the AuthContext types of the policies that validate an
+// OAuth access token: jwt-auth, opaque-token-auth, and mcp-auth (which delegates to
+// jwt-auth). Only their layers can carry the token's cnf claim. Other layers are
+// ignored: client credentials without a token (api-key-auth, basic-auth, mtls-auth)
+// and credentials the gateway itself sends to the backend (oauth2-generator,
+// aws-authentication), which also mark their layers authenticated.
+var accessTokenAuthTypes = map[string]bool{"jwt": true, "opaque": true, "mcp/oauth": true}
+
 // GetPolicy parses and validates the instance's parameters. An unusable value
 // fails the deployment rather than weakening verification at request time.
 func GetPolicy(metadata policy.PolicyMetadata, params map[string]interface{}) (policy.Policy, error) {
@@ -125,7 +133,7 @@ func GetPolicy(metadata policy.PolicyMetadata, params map[string]interface{}) (p
 		return nil, fmt.Errorf("dpop: nonceSecret must be at least %d bytes", minNonceSecretLength)
 	}
 	if cfg.requireNonce && secret == "" {
-		slog.Warn("dpop: requireNonce is on without nonceSecret; nonces are signed with a per-process key, so with more than one gateway replica a nonce issued by one replica is refused by another. Set the same nonceSecret on every replica.",
+		warnEvery("nonce-secret:"+metadata.APIName, time.Now(), "dpop: requireNonce is on without nonceSecret; nonces are signed with a per-process key, so with more than one gateway replica a nonce issued by one replica is refused by another. Set the same nonceSecret on every replica.",
 			slog.String("api", metadata.APIName))
 	}
 	replay, err := newReplayChecker(params, maxSize)
@@ -165,9 +173,10 @@ func (p *DPoPPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Reques
 
 	binding := tokenBinding(shared.AuthContext)
 	if !binding.authenticated {
-		slog.Warn("dpop: no authenticated access token on the request; attach the dpop policy after jwt-auth or opaque-token-auth",
+		warnEvery("misconfigured:"+shared.APIName, p.now(),
+			"dpop: no access-token policy authenticated the request; attach jwt-auth, opaque-token-auth or mcp-auth before the dpop policy in the same chain. Every request is refused until then.",
 			slog.String("api", shared.APIName))
-		return p.reject(shared, errInvalidToken("no authenticated access token", "access token required"))
+		return p.reject(shared, errInvalidToken("no access-token policy authenticated the request", "access token required"))
 	}
 	if binding.malformed != "" {
 		// RFC 9449 section 6: the resource server must reliably tell whether a token is
@@ -214,7 +223,7 @@ func (p *DPoPPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Reques
 
 	target, terr := p.requestTarget(req)
 	if terr != nil {
-		slog.Warn("dpop: cannot determine the request URI to check htu against; configure htuOrigins",
+		warnEvery("request-uri:"+shared.APIName, p.now(), "dpop: cannot determine the request URI to check htu against; configure htuOrigins",
 			slog.String("api", shared.APIName), slog.String("error", terr.Error()))
 		return p.reject(shared, errInvalidProofDetail("gateway cannot determine the request URI", terr.Error()))
 	}
@@ -265,19 +274,20 @@ func (p *DPoPPolicy) allow(proofPresent bool) policy.RequestHeaderAction {
 
 // binding is what the AuthContext chain says about the access token's DPoP binding.
 type binding struct {
-	authenticated bool   // some layer authenticated the caller
+	authenticated bool   // an access-token policy authenticated the caller
 	jkt           string // cnf.jkt of the token; empty when the token is not DPoP-bound
 	malformed     string // why the binding could not be read, when it could not
 }
 
-// tokenBinding walks the AuthContext chain, newest first, to the newest
-// authenticated layer that carries a cnf claim, or that declares itself a DPoP
-// token through an introspected token_type. A cnf without jkt (for example an
-// mTLS-bound token's x5t#S256) is not a DPoP binding.
+// tokenBinding walks the AuthContext chain, newest first, over the layers an
+// access-token policy authenticated (accessTokenAuthTypes), to the newest one that
+// carries a cnf claim, or that declares itself a DPoP token through an introspected
+// token_type. A cnf without jkt (for example an mTLS-bound token's x5t#S256) is not
+// a DPoP binding.
 func tokenBinding(ac *policy.AuthContext) binding {
 	var b binding
 	for layer := ac; layer != nil; layer = layer.Previous {
-		if !layer.Authenticated {
+		if !layer.Authenticated || !accessTokenAuthTypes[layer.AuthType] {
 			continue
 		}
 		b.authenticated = true

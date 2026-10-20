@@ -7,7 +7,7 @@ title: "Overview"
 
 The DPoP policy enforces OAuth 2.0 Demonstrating Proof of Possession ([RFC 9449](https://www.rfc-editor.org/rfc/rfc9449)) on an API. A DPoP-bound access token is tied to a key pair the client holds. With every request, the client signs a short-lived JWT, the DPoP proof, and sends it in the `DPoP` header. The gateway accepts the request only when the proof was made for this exact request, by the key the access token is bound to. A leaked or stolen access token is useless without the client's private key.
 
-The policy checks the proof and the binding. The access token itself is validated by [JWT Auth](../../../jwt-auth/v1.3/docs/jwt-authentication.md) or Opaque Token Auth, attached before this policy. The DPoP policy reads the token's confirmation claim, `cnf.jkt`, from what that policy recorded.
+The policy checks the proof and the binding. The access token itself is validated by [JWT Auth](../../../jwt-auth/v1.3/docs/jwt-authentication.md), Opaque Token Auth or MCP Auth, attached before this policy in the same chain. The DPoP policy reads the token's confirmation claim, `cnf.jkt`, from what that policy recorded. If no access-token policy ran first, for example because the order is wrong or the policy is missing, every request is refused: a misconfiguration never lets requests through.
 
 ## Features
 
@@ -193,7 +193,7 @@ With `authheaderscheme` empty, every JWT Auth instance that does not set `authHe
 
 The policy runs in the request-header phase, after the access-token policy.
 
-1. **Find the binding.** It reads the newest authenticated layer of the authentication context that carries `cnf`. A `cnf` without `jkt` (for example an mTLS-bound token's `x5t#S256`) is not a DPoP binding. A binding it cannot read reliably is refused, not treated as unbound: a `cnf` that is not an object, a `jkt` that is not a non-empty string, or an introspected `token_type` of `DPoP` without `cnf.jkt`. With no authenticated layer, it refuses the request: the policy was attached without an access-token policy before it.
+1. **Find the binding.** Policies hand authentication results to later policies through the authentication context, a per-request record inside the gateway that clients cannot write to. The DPoP policy considers only the layers written by an access-token policy (JWT Auth, Opaque Token Auth, MCP Auth), and reads the newest one that carries `cnf`. Layers from other policies are ignored, even if they carry a `cnf` value: client credentials without a token (API Key Auth, Basic Auth, Mutual TLS Auth) and credentials the gateway sends to the backend (OAuth2 Generator, AWS Authentication). A `cnf` without `jkt` (for example an mTLS-bound token's `x5t#S256`) is not a DPoP binding. A binding it cannot read reliably is refused, not treated as unbound: a `cnf` that is not an object, a `jkt` that is not a non-empty string, or an introspected `token_type` of `DPoP` without `cnf.jkt`. With no layer from an access-token policy, it refuses the request, in both modes, and logs `dpop: no access-token policy authenticated the request` at most once a minute.
 2. **Check the scheme.** More than one `Authorization` header is refused with `400`. A bound token must use the `DPoP` scheme. An unbound `Bearer` token is refused in `required` mode and passes in `optional` mode, where a stray `DPoP` header is removed. An unbound token with the `DPoP` scheme is refused.
 3. **Verify the proof.** One `DPoP` header of at most 8 KB; `typ` is `dpop+jwt`; `alg` is accepted; no `crit` header; `jwk` is a public key matching `alg` (EC P-256/P-384/P-521 on the curve, RSA 2048 to 8192 bits, or Ed25519) with no private members, and the signature verifies with it. The key comes only from `jwk`; `kid`, `jku`, `x5u` and `x5c` are never used. Then `jti`, `htm`, `htu`, `iat` and `ath` are present; `htm` equals the method; `htu` matches the request URI ([Matching htu](#matching-htu)); `iat` is at most `clockskew` in the future and `proofMaxAge` plus `clockskew` in the past; the nonce is valid (with `requireNonce`); `ath` is the access token's hash; and the `jwk` thumbprint equals `cnf.jkt`.
 4. **Record it.** The proof's `jti` is recorded for this key until the proof would expire anyway. A `jti` seen before is a replay. Recording happens only after every other check passes, so a refused proof never uses one up.
@@ -322,7 +322,7 @@ Each refusal names the check that failed in `error_description`, in both the `WW
 | 401 `invalid_token` | `invalid DPoP key binding` | Sign the proof with the key the token was issued for; if it persists, check the token's `cnf` claim. |
 | 401 `invalid_token` | `access token is not DPoP-bound` | Request a DPoP-bound token (send a proof to the token endpoint), or use the `Bearer` scheme on an `optional` API. |
 | 401 `invalid_token` (in a `Bearer` challenge) | `DPoP-bound access token requires the DPoP authorization scheme`, `DPoP-bound access token required` | Send `Authorization: DPoP <token>` with a proof. |
-| 401 `invalid_token` | `access token required` | Attach JWT Auth or Opaque Token Auth before the DPoP policy. |
+| 401 `invalid_token` | `access token required` | No access-token policy ran before the DPoP policy. Attach JWT Auth, Opaque Token Auth or MCP Auth before it, in the same chain. |
 | 400 `invalid_request` | `multiple methods used to include access token` | Send one `Authorization` header. |
 | 503 `temporarily_unavailable` | `DPoP replay protection is unavailable; retry later` | The replay cache is full or Redis is unreachable. See [Sizing](#sizing) and [Replay Protection Across Replicas](#replay-protection-across-replicas). |
 
@@ -340,6 +340,6 @@ A refusal from the access-token policy before the DPoP policy, such as an expire
 
 ## Related Policies
 
-- **JWT Auth** and **Opaque Token Auth**: validate the access token; attach one before this policy
+- **JWT Auth**, **Opaque Token Auth** and **MCP Auth**: validate the access token; attach one before this policy
 - **Mutual TLS Auth**: binds tokens to a client certificate instead (RFC 8705); a token bound with `cnf` `x5t#S256` is not DPoP-bound and must be enforced with mTLS
 - **CORS**: expose `WWW-Authenticate` and `DPoP-Nonce`, and allow the `DPoP` header, for browser clients

@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/redis/go-redis/v9"
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
@@ -219,4 +220,81 @@ func TestRedisConfigValidation(t *testing.T) {
 	} else if _, ok := pol.(*DPoPPolicy).replay.(*replayStore); !ok {
 		t.Errorf("default replay store is %T, want memory", pol.(*DPoPPolicy).replay)
 	}
+}
+
+// reloadRuns counts runs of TestConcurrentTrafficDuringReload, to move each run's clock.
+var reloadRuns int
+
+// TestConcurrentTrafficDuringReload replays proofs from many goroutines while others
+// rebuild policy instances, as a configuration reload does: each proof is accepted
+// exactly once, and the shared stores stay consistent under the race detector.
+func TestConcurrentTrafficDuringReload(t *testing.T) {
+	r := newFakeRedis()
+	local := replicaWithRedis(t, r, redisFailureLocal)
+	closed := replicaWithRedis(t, r, redisFailureClosed)
+	memory := newTestPolicy(t, nil)
+	memory.replay = sharedReplayStore(1000) // the store reloads resize
+	// Each run gets its own clock, an hour after the last, so entries earlier runs
+	// left in the shared store expire instead of filling it.
+	reloadRuns++
+	now := testNow.Add(time.Duration(reloadRuns) * time.Hour)
+	for _, p := range []*DPoPPolicy{local, closed, memory} {
+		p.now = func() time.Time { return now }
+	}
+	key := newKey(t, "ES256")
+	proofs := make([]string, 40)
+	for i := range proofs {
+		proofs[i] = key.sign(t, func(c jwt.MapClaims, _ map[string]interface{}) { c["iat"] = now.Unix() })
+	}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for g := 0; g < 2; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				params := map[string]interface{}{"replayCacheMaxSize": float64(1000 + (i+g)%7)}
+				if _, err := GetPolicy(policy.PolicyMetadata{APIName: "orders"}, params); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}(g)
+	}
+
+	for name, p := range map[string]*DPoPPolicy{"redis local": local, "redis closed": closed, "memory": memory} {
+		var mu sync.Mutex
+		accepted := map[int]int{}
+		var traffic sync.WaitGroup
+		for c := 0; c < 4; c++ {
+			for i := range proofs {
+				traffic.Add(1)
+				go func(i int) {
+					defer traffic.Done()
+					if _, ok := run(p, dpopRequest(key, proofs[i])).(policy.UpstreamRequestHeaderModifications); ok {
+						mu.Lock()
+						accepted[i]++
+						mu.Unlock()
+					}
+				}(i)
+			}
+		}
+		traffic.Wait()
+		for i := range proofs {
+			if accepted[i] != 1 {
+				t.Errorf("%s: proof %d accepted %d times, want 1", name, i, accepted[i])
+			}
+		}
+		r.mu.Lock()
+		r.ttls = map[string]time.Duration{}
+		r.mu.Unlock()
+	}
+	close(stop)
+	wg.Wait()
 }

@@ -64,9 +64,6 @@ type redisReplayStore struct {
 	prefix      string
 	failureMode string
 	local       *replayStore
-
-	warnMu sync.Mutex
-	warned time.Time
 }
 
 // checkAndStore records the proof key in Redis with SET NX and an expiry, following failureMode when Redis fails.
@@ -94,23 +91,12 @@ func (r *redisReplayStore) checkAndStore(ctx context.Context, key [32]byte, expi
 		}
 		return replaySeen
 	}
-	r.warnUnavailable(err, now)
+	warnEvery("redis-unavailable", now, "dpop: cannot record proof identifiers in Redis",
+		slog.String("failureMode", r.failureMode), slog.String("error", err.Error()))
 	if r.failureMode == redisFailureLocal {
 		return localResult
 	}
 	return replayUnavailable
-}
-
-// warnUnavailable logs a Redis failure at most once a minute, so an outage does not flood the log.
-func (r *redisReplayStore) warnUnavailable(err error, now time.Time) {
-	r.warnMu.Lock()
-	defer r.warnMu.Unlock()
-	if now.Sub(r.warned) < time.Minute {
-		return
-	}
-	r.warned = now
-	slog.Warn("dpop: cannot record proof identifiers in Redis",
-		slog.String("failureMode", r.failureMode), slog.String("error", err.Error()))
 }
 
 // redisConfig mirrors the dpop redis system parameters.
@@ -146,7 +132,7 @@ func newReplayChecker(params map[string]interface{}, maxSize int) (replayChecker
 		return nil, err
 	}
 	if rc.tls.Enabled && rc.tls.InsecureSkipVerify {
-		slog.Warn("dpop: redis.tls.insecureSkipVerify is on; the Redis server certificate is not verified")
+		warnEvery("redis-tls-insecure", time.Now(), "dpop: redis.tls.insecureSkipVerify is on; the Redis server certificate is not verified")
 	}
 	opts := &redis.Options{
 		Addr:         net.JoinHostPort(rc.host, strconv.Itoa(rc.port)),
@@ -161,7 +147,7 @@ func newReplayChecker(params map[string]interface{}, maxSize int) (replayChecker
 	}
 	client, created, pingErr := sharedRedisClient(opts, tlsFingerprint, rc.connectionTimeout)
 	if created && pingErr != nil {
-		slog.Warn("dpop: Redis replay store is not reachable yet; requests follow failureMode until it is",
+		warnEvery("redis-unreachable-at-start:"+opts.Addr, time.Now(), "dpop: Redis replay store is not reachable yet; requests follow failureMode until it is",
 			slog.String("addr", opts.Addr), slog.String("failureMode", rc.failureMode), slog.String("error", pingErr.Error()))
 	}
 	return &redisReplayStore{client: client, prefix: rc.keyPrefix, failureMode: rc.failureMode, local: local}, nil

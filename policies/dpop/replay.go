@@ -64,7 +64,6 @@ type replayStore struct {
 	maxSize int
 	entries map[[32]byte]time.Time
 	expiry  expiryHeap // soonest expiry first
-	warned  time.Time
 }
 
 // newReplayStore returns an empty store that holds at most maxSize live entries.
@@ -90,11 +89,8 @@ func (s *replayStore) checkAndStore(_ context.Context, key [32]byte, expiry, now
 	}
 	s.purgeExpired(now)
 	if len(s.entries) >= s.maxSize {
-		if now.Sub(s.warned) > time.Minute {
-			s.warned = now
-			slog.Warn("dpop: replay cache is full of unexpired proof identifiers; refusing DPoP requests until entries expire. Raise replayCacheMaxSize or lower proofMaxAge.",
-				slog.Int("replayCacheMaxSize", s.maxSize))
-		}
+		warnEvery("replay-cache-full", now, "dpop: replay cache is full of unexpired proof identifiers; refusing DPoP requests until entries expire. Raise replayCacheMaxSize or lower proofMaxAge.",
+			slog.Int("replayCacheMaxSize", s.maxSize))
 		return replayFull
 	}
 	s.entries[key] = expiry
