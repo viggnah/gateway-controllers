@@ -72,10 +72,13 @@ func (r *redisReplayStore) checkAndStore(ctx context.Context, key [32]byte, expi
 	// whether Redis is up or not, so its history stays continuous: a proof accepted
 	// before an outage is still refused during it, and one accepted during an
 	// outage is still refused after Redis returns.
+	// The local record is required, not best effort: a proof accepted without it
+	// could be replayed on this replica during a later outage, so a full record
+	// refuses the request, as the memory store does.
 	localResult := replayStored
 	if r.failureMode == redisFailureLocal {
-		if localResult = r.local.checkAndStore(ctx, key, expiry, now); localResult == replaySeen {
-			return replaySeen
+		if localResult = r.local.checkAndStore(ctx, key, expiry, now); localResult != replayStored {
+			return localResult
 		}
 	}
 
@@ -85,7 +88,6 @@ func (r *redisReplayStore) checkAndStore(ctx context.Context, key [32]byte, expi
 	}
 	stored, err := r.client.SetNX(ctx, r.prefix+hex.EncodeToString(key[:]), 1, ttl).Result()
 	if err == nil {
-		// Redis is the authority while it answers; a full local record is not fatal.
 		if stored {
 			return replayStored
 		}

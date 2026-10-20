@@ -158,6 +158,26 @@ func TestRedisLocalFallbackKeepsHistory(t *testing.T) {
 	expectRejected(t, run(p, dpopRequest(key, during)), "invalid_dpop_proof")
 }
 
+// TestRedisLocalModeFullLocalRecordRefuses refuses a proof in local mode when the
+// replica's own record is full, even though Redis would accept it: accepted without
+// a local entry, it could be replayed on this replica during a later outage.
+func TestRedisLocalModeFullLocalRecordRefuses(t *testing.T) {
+	r := newFakeRedis()
+	p := replicaWithRedis(t, r, redisFailureLocal)
+	p.replay.(*redisReplayStore).local = newReplayStore(1)
+	key := newKey(t, "ES256")
+	expectAllowed(t, run(p, dpopRequest(key, key.sign(t, nil))))
+
+	second := key.sign(t, nil)
+	resp, ok := run(p, dpopRequest(key, second)).(policy.ImmediateResponse)
+	if !ok || resp.StatusCode != 503 {
+		t.Fatalf("full local record: got %+v, want 503", resp)
+	}
+	if len(r.ttls) != 1 {
+		t.Errorf("refused proof was recorded in Redis: %d keys, want 1", len(r.ttls))
+	}
+}
+
 // TestRedisClosedModeKeepsNoLocalRecord checks that the default mode leaves the
 // replica's memory alone: Redis is the only record.
 func TestRedisClosedModeKeepsNoLocalRecord(t *testing.T) {

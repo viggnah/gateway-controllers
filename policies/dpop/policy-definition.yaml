@@ -186,7 +186,8 @@ systemParameters:
             serving: each replica also records every proof it accepts in its own
             memory and relies on that record while Redis is down, so replays to the
             same replica are refused before, during and after an outage, but not
-            across replicas.
+            across replicas. Size replayCacheMaxSize as for the memory store: a full
+            local record refuses requests with 503 even while Redis is up.
           enum: ["closed", "local"]
           default: "closed"
           "wso2/defaultValue": "${config.policy_configurations.dpop_v0.redis.failure_mode}"
