@@ -93,6 +93,9 @@ type config struct {
 	nonceLifetime time.Duration
 	htuOrigins    []string
 	forwardProof  bool
+	// tokenAuthTypes are the AuthContext types whose layers count as a validated
+	// access token.
+	tokenAuthTypes map[string]bool
 }
 
 // DPoPPolicy verifies DPoP proofs for one API or operation.
@@ -103,13 +106,15 @@ type DPoPPolicy struct {
 	now    func() time.Time
 }
 
-// accessTokenAuthTypes are the AuthContext types of the policies that validate an
-// OAuth access token: jwt-auth, opaque-token-auth, and mcp-auth (which delegates to
-// jwt-auth). Only their layers can carry the token's cnf claim. Other layers are
-// ignored: client credentials without a token (api-key-auth, basic-auth, mtls-auth)
-// and credentials the gateway itself sends to the backend (oauth2-generator,
-// aws-authentication), which also mark their layers authenticated.
-var accessTokenAuthTypes = map[string]bool{"jwt": true, "opaque": true, "mcp/oauth": true}
+// defaultAccessTokenAuthTypes are the AuthContext types of the policies that validate
+// an OAuth access token: jwt-auth, opaque-token-auth, and mcp-auth (which delegates
+// to jwt-auth). The accessTokenAuthTypes system parameter replaces the list, so a new
+// token policy is enabled by configuration, not by changing this policy. Layers of
+// any other type are ignored, so an unlisted policy fails closed: client credentials
+// without a token (api-key-auth, basic-auth, mtls-auth) and credentials the gateway
+// itself sends to the backend (oauth2-generator, aws-authentication) also mark their
+// layers authenticated, and must never stand in for a validated access token.
+var defaultAccessTokenAuthTypes = []string{"jwt", "opaque", "mcp/oauth"}
 
 // GetPolicy parses and validates the instance's parameters. An unusable value
 // fails the deployment rather than weakening verification at request time.
@@ -171,11 +176,12 @@ func (p *DPoPPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Reques
 	shared := reqCtx.SharedContext
 	req := reqCtx.DownstreamRequest()
 
-	binding := tokenBinding(shared.AuthContext)
+	binding := tokenBinding(shared.AuthContext, p.cfg.tokenAuthTypes)
 	if !binding.authenticated {
 		warnEvery("misconfigured:"+shared.APIName, p.now(),
-			"dpop: no access-token policy authenticated the request; attach jwt-auth, opaque-token-auth or mcp-auth before the dpop policy in the same chain. Every request is refused until then.",
-			slog.String("api", shared.APIName))
+			"dpop: no access-token policy authenticated the request; attach jwt-auth, opaque-token-auth or mcp-auth before the dpop policy in the same chain. If another policy in the chain validates OAuth access tokens, add its AuthContext type to accesstokenauthtypes. Every request is refused until then.",
+			slog.String("api", shared.APIName),
+			slog.Any("authenticatedTypesIgnored", binding.ignored))
 		return p.reject(shared, errInvalidToken("no access-token policy authenticated the request", "access token required"))
 	}
 	if binding.malformed != "" {
@@ -274,20 +280,25 @@ func (p *DPoPPolicy) allow(proofPresent bool) policy.RequestHeaderAction {
 
 // binding is what the AuthContext chain says about the access token's DPoP binding.
 type binding struct {
-	authenticated bool   // an access-token policy authenticated the caller
-	jkt           string // cnf.jkt of the token; empty when the token is not DPoP-bound
-	malformed     string // why the binding could not be read, when it could not
+	authenticated bool     // an access-token policy authenticated the caller
+	jkt           string   // cnf.jkt of the token; empty when the token is not DPoP-bound
+	malformed     string   // why the binding could not be read, when it could not
+	ignored       []string // types of authenticated layers that are not access-token layers
 }
 
 // tokenBinding walks the AuthContext chain, newest first, over the layers an
-// access-token policy authenticated (accessTokenAuthTypes), to the newest one that
+// access-token policy authenticated (types in tokenTypes), to the newest one that
 // carries a cnf claim, or that declares itself a DPoP token through an introspected
 // token_type. A cnf without jkt (for example an mTLS-bound token's x5t#S256) is not
 // a DPoP binding.
-func tokenBinding(ac *policy.AuthContext) binding {
+func tokenBinding(ac *policy.AuthContext, tokenTypes map[string]bool) binding {
 	var b binding
 	for layer := ac; layer != nil; layer = layer.Previous {
-		if !layer.Authenticated || !accessTokenAuthTypes[layer.AuthType] {
+		if !layer.Authenticated {
+			continue
+		}
+		if !tokenTypes[layer.AuthType] {
+			b.ignored = append(b.ignored, layer.AuthType)
 			continue
 		}
 		b.authenticated = true
@@ -547,6 +558,21 @@ func parseConfig(params map[string]interface{}) (config, error) {
 		}
 	}
 	cfg.algsChallenge = strings.Join(cfg.algorithms, " ")
+
+	tokenTypes, err := stringListParam(params, "accessTokenAuthTypes", defaultAccessTokenAuthTypes)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.tokenAuthTypes = make(map[string]bool, len(tokenTypes))
+	for _, t := range tokenTypes {
+		if t = strings.TrimSpace(t); t == "" {
+			return cfg, fmt.Errorf("accessTokenAuthTypes must not contain an empty type")
+		}
+		cfg.tokenAuthTypes[t] = true
+	}
+	if len(cfg.tokenAuthTypes) == 0 {
+		return cfg, fmt.Errorf("accessTokenAuthTypes must list at least one AuthContext type")
+	}
 
 	if cfg.proofMaxAge, err = durationParam(params, "proofMaxAge", defaultProofMaxAge); err != nil {
 		return cfg, err

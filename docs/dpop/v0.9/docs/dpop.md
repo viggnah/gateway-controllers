@@ -98,8 +98,9 @@ A value the policy cannot use, such as an unknown algorithm or an `htuOrigins` e
 | `noncelifetime` | `"5m"` | How long a gateway-issued nonce is valid. |
 | `noncesecret` | `""` | Secret, at least 32 bytes, that signs nonces. Set the same value on every replica (see [Secrets](#secrets-and-configuration)). Empty: each process uses its own random key, which works only with one replica. |
 | `replaycachemaxsize` | `100000` | Proof identifiers each replica's in-memory cache can hold, across all APIs. Entries are never dropped before they expire; while the cache is full, DPoP requests are refused with `503`. About 150 bytes each, so the default uses about 15 MB. |
-| `replay_store` | `"memory"` | `memory`: each replica remembers the proofs it accepted. `redis`: every replica shares one record, so a proof is accepted once across the deployment. |
-| `[…dpop_v0.redis]` | | Used when `replay_store = "redis"`. Same keys as the rate-limit policies' Redis block: `host` (`localhost`), `port` (`6379`), `username`, `password`, `db` (`0`), `key_prefix` (`"dpop:v0:"`), `failure_mode` (`"closed"`), `connection_timeout` (`"5s"`), `read_timeout` (`"1s"`), `write_timeout` (`"1s"`), `pool_size` (`0` = go-redis default), and `[…dpop_v0.redis.tls]` with `enabled`, `ca_file`, `server_name`, `insecure_skip_verify`, `cert_file`, `key_file`. |
+| `accesstokenauthtypes` | `["jwt", "opaque", "mcp/oauth"]` | AuthContext types of the policies that validate OAuth access tokens: JWT Auth, Opaque Token Auth and MCP Auth by default. Only their entries count as a validated token and can carry its `cnf.jkt`. Add the type of any other policy that validates access tokens (see [Using another token policy](#using-another-token-policy)). |
+| `replaystore` | `"memory"` | `memory`: each replica remembers the proofs it accepted. `redis`: every replica shares one record, so a proof is accepted once across the deployment. |
+| `[…dpop_v0.redis]` | | Used when `replaystore = "redis"`. Same keys as the rate-limit policies' Redis block: `host` (`localhost`), `port` (`6379`), `username`, `password`, `db` (`0`), `key_prefix` (`"dpop:v0:"`), `failure_mode` (`"closed"`), `connection_timeout` (`"5s"`), `read_timeout` (`"1s"`), `write_timeout` (`"1s"`), `pool_size` (`0` = go-redis default), and `[…dpop_v0.redis.tls]` with `enabled`, `ca_file`, `server_name`, `insecure_skip_verify`, `cert_file`, `key_file`. |
 | `redis.failure_mode` | `"closed"` | While Redis is unreachable: `closed` refuses DPoP requests with `503`, so no proof is accepted unrecorded; `local` keeps serving: each replica also records every proof it accepts in its own memory, and relies on that record alone while Redis is down, so replays to the same replica are still refused, before, during and after an outage. That record is required: size `replaycachemaxsize` as for the memory store, since a full record refuses requests with `503` even while Redis is up. |
 
 #### Sample System Configuration
@@ -107,7 +108,7 @@ A value the policy cannot use, such as an unknown algorithm or an `htuOrigins` e
 ```toml
 [policy_configurations.dpop_v0]
 noncesecret = '{{ env "APIP_GW_DPOP_NONCE_SECRET" }}'
-replay_store = "redis"
+replaystore = "redis"
 
 [policy_configurations.dpop_v0.redis]
 host = "redis.gateway.svc.cluster.local"
@@ -193,11 +194,22 @@ With `authheaderscheme` empty, every JWT Auth instance that does not set `authHe
 
 The policy runs in the request-header phase, after the access-token policy.
 
-1. **Find the binding.** Policies hand authentication results to later policies through the authentication context, a per-request record inside the gateway that clients cannot write to. The DPoP policy considers only the layers written by an access-token policy (JWT Auth, Opaque Token Auth, MCP Auth), and reads the newest one that carries `cnf`. Layers from other policies are ignored, even if they carry a `cnf` value: client credentials without a token (API Key Auth, Basic Auth, Mutual TLS Auth) and credentials the gateway sends to the backend (OAuth2 Generator, AWS Authentication). A `cnf` without `jkt` (for example an mTLS-bound token's `x5t#S256`) is not a DPoP binding. A binding it cannot read reliably is refused, not treated as unbound: a `cnf` that is not an object, a `jkt` that is not a non-empty string, or an introspected `token_type` of `DPoP` without `cnf.jkt`. With no layer from an access-token policy, it refuses the request, in both modes, and logs `dpop: no access-token policy authenticated the request` at most once a minute.
+1. **Find the binding.** Policies hand authentication results to later policies through the authentication context, a per-request record inside the gateway that clients cannot write to. The DPoP policy considers only the layers written by an access-token policy, those whose type is in `accesstokenauthtypes` (JWT Auth, Opaque Token Auth and MCP Auth by default), and reads the newest one that carries `cnf`. Layers from other policies are ignored, even if they carry a `cnf` value: client credentials without a token (API Key Auth, Basic Auth, Mutual TLS Auth) and credentials the gateway sends to the backend (OAuth2 Generator, AWS Authentication). A `cnf` without `jkt` (for example an mTLS-bound token's `x5t#S256`) is not a DPoP binding. A binding it cannot read reliably is refused, not treated as unbound: a `cnf` that is not an object, a `jkt` that is not a non-empty string, or an introspected `token_type` of `DPoP` without `cnf.jkt`. With no layer from an access-token policy, it refuses the request, in both modes, and logs `dpop: no access-token policy authenticated the request` at most once a minute.
 2. **Check the scheme.** More than one `Authorization` header is refused with `400`. A bound token must use the `DPoP` scheme. An unbound `Bearer` token is refused in `required` mode and passes in `optional` mode, where a stray `DPoP` header is removed. An unbound token with the `DPoP` scheme is refused.
 3. **Verify the proof.** One `DPoP` header of at most 8 KB; `typ` is `dpop+jwt`; `alg` is accepted; no `crit` header; `jwk` is a public key matching `alg` (EC P-256/P-384/P-521 on the curve, RSA 2048 to 8192 bits, or Ed25519) with no private members, and the signature verifies with it. The key comes only from `jwk`; `kid`, `jku`, `x5u` and `x5c` are never used. Then `jti`, `htm`, `htu`, `iat` and `ath` are present; `htm` equals the method; `htu` matches the request URI ([Matching htu](#matching-htu)); `iat` is at most `clockskew` in the future and `proofMaxAge` plus `clockskew` in the past; the nonce is valid (with `requireNonce`); `ath` is the access token's hash; and the `jwk` thumbprint equals `cnf.jkt`.
 4. **Record it.** The proof's `jti` is recorded for this key until the proof would expire anyway. A `jti` seen before is a replay. Recording happens only after every other check passes, so a refused proof never uses one up.
 5. **Continue.** The `DPoP` header is removed (unless `forwardProof`), and the key thumbprint is stored in the shared metadata as `dpop.jkt` for later policies. `Authorization` and the access-token policy's authentication context are left as they are.
+
+### Using another token policy
+
+The DPoP policy works with any policy that validates the OAuth access token before it, provided that policy records the token's claims, including `cnf`, in the authentication context as JWT Auth does. Add its AuthContext type to `accesstokenauthtypes`; the list replaces the default, so keep the default types you use:
+
+```toml
+[policy_configurations.dpop_v0]
+accesstokenauthtypes = ["jwt", "opaque", "mcp/oauth", "acme-token"]
+```
+
+Until you do, its entries are ignored and every request is refused, so a new policy is never trusted by accident. The gateway log names the types it ignored: `dpop: no access-token policy authenticated the request … authenticatedTypesIgnored=[acme-token]`. Never add a type that authenticates without an access token (`apikey`, `basic`, `mtls`) or attaches the gateway's own credentials to the backend (`oauth2`, `aws-sigv4`).
 
 ### Matching `htu`
 
@@ -215,7 +227,7 @@ The policy runs in the policy engine, inside every gateway runtime pod. Gateway 
 
 | | Single replica | Several replicas |
 |---|---|---|
-| Replay protection | `memory` (default) | `replay_store = "redis"`, or accept that a captured proof can be used once per replica within `proofMaxAge` |
+| Replay protection | `memory` (default) | `replaystore = "redis"`, or accept that a captured proof can be used once per replica within `proofMaxAge` |
 | `noncesecret` (only with `requireNonce`) | optional | required, the same on every replica |
 | `htu` behind a load balancer | `htuOrigins` when the load balancer terminates TLS or changes the host | same |
 | Clocks | NTP on the gateway nodes | NTP on every node |
@@ -228,7 +240,7 @@ With the default `memory` store, each replica remembers only the proofs it accep
 
 ```toml
 [policy_configurations.dpop_v0]
-replay_store = "redis"
+replaystore = "redis"
 
 [policy_configurations.dpop_v0.redis]
 host = "my-redis.example.internal"
@@ -255,7 +267,7 @@ Put `noncesecret` and the Redis password in the gateway's secret store and refer
       policy_configurations:
         dpop_v0:
           noncesecret: '{{ env "APIP_GW_DPOP_NONCE_SECRET" }}'
-          replay_store: redis
+          replaystore: redis
           redis:
             host: redis.gateway.svc.cluster.local
             password: '{{ env "APIP_GW_DPOP_REDIS_PASSWORD" }}'
@@ -322,7 +334,7 @@ Each refusal names the check that failed in `error_description`, in both the `WW
 | 401 `invalid_token` | `invalid DPoP key binding` | Sign the proof with the key the token was issued for; if it persists, check the token's `cnf` claim. |
 | 401 `invalid_token` | `access token is not DPoP-bound` | Request a DPoP-bound token (send a proof to the token endpoint), or use the `Bearer` scheme on an `optional` API. |
 | 401 `invalid_token` (in a `Bearer` challenge) | `DPoP-bound access token requires the DPoP authorization scheme`, `DPoP-bound access token required` | Send `Authorization: DPoP <token>` with a proof. |
-| 401 `invalid_token` | `access token required` | No access-token policy ran before the DPoP policy. Attach JWT Auth, Opaque Token Auth or MCP Auth before it, in the same chain. |
+| 401 `invalid_token` | `access token required` | No access-token policy ran before the DPoP policy. Attach JWT Auth, Opaque Token Auth or MCP Auth before it, in the same chain. If another policy validates the token, add its type to `accesstokenauthtypes`; the warning in the gateway log lists the types it ignored. |
 | 400 `invalid_request` | `multiple methods used to include access token` | Send one `Authorization` header. |
 | 503 `temporarily_unavailable` | `DPoP replay protection is unavailable; retry later` | The replay cache is full or Redis is unreachable. See [Sizing](#sizing) and [Replay Protection Across Replicas](#replay-protection-across-replicas). |
 

@@ -123,6 +123,23 @@ systemParameters:
       minimum: 1
       "wso2/defaultValue": "${config.policy_configurations.dpop_v0.replaycachemaxsize}"
 
+    accessTokenAuthTypes:
+      type: array
+      description: >-
+        AuthContext types of the policies that validate OAuth access tokens. Only
+        their entries are trusted to say a token was validated and to carry its
+        cnf.jkt binding; entries of any other type are ignored. The default covers
+        jwt-auth (jwt), opaque-token-auth (opaque) and mcp-auth (mcp/oauth). Add the
+        type of any other policy that validates access tokens; never add a policy that
+        authenticates without a token or sends the gateway's own credentials to the
+        backend (apikey, basic, mtls, oauth2, aws-sigv4).
+      minItems: 1
+      items:
+        type: string
+        minLength: 1
+      default: ["jwt", "opaque", "mcp/oauth"]
+      "wso2/defaultValue": "${config.policy_configurations.dpop_v0.accesstokenauthtypes}"
+
     replayStore:
       type: string
       description: >-
@@ -133,7 +150,7 @@ systemParameters:
         proof is accepted once across the whole deployment.
       enum: ["memory", "redis"]
       default: "memory"
-      "wso2/defaultValue": "${config.policy_configurations.dpop_v0.replay_store}"
+      "wso2/defaultValue": "${config.policy_configurations.dpop_v0.replaystore}"
 
     redis:
       type: object

@@ -1262,3 +1262,44 @@ func TestMisconfigurationWarningIsRateLimited(t *testing.T) {
 		t.Errorf("logged %d warnings for 7 requests over 61s on two instances, want 2:\n%s", n, buf.String())
 	}
 }
+
+// TestAccessTokenAuthTypesIsConfigurable enables a new token policy by configuration:
+// its layer is ignored by default, with a warning naming its type, and trusted once
+// its type is listed in accessTokenAuthTypes.
+func TestAccessTokenAuthTypesIsConfigurable(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	warnLimiter.mu.Lock()
+	warnLimiter.last = make(map[string]time.Time)
+	warnLimiter.mu.Unlock()
+
+	key := newKey(t, "ES256")
+	custom := boundJWT(key.jkt)
+	custom.AuthType = "acme-token"
+	request := func() *policy.RequestHeaderContext {
+		return newRequest(reqOpts{auth: custom, authz: []string{"DPoP " + testToken}, proofs: []string{key.sign(t, nil)}})
+	}
+
+	expectRejected(t, run(newTestPolicy(t, nil), request()), "invalid_token")
+	if !strings.Contains(buf.String(), "acme-token") {
+		t.Errorf("warning does not name the ignored type:\n%s", buf.String())
+	}
+
+	p := newTestPolicy(t, map[string]interface{}{"accessTokenAuthTypes": []interface{}{"jwt", "acme-token"}})
+	expectAllowed(t, run(p, request()))
+	// Listing a type replaces the default list: opaque is no longer trusted here.
+	opaque := boundJWT(key.jkt)
+	opaque.AuthType = "opaque"
+	expectRejected(t, run(p, newRequest(reqOpts{auth: opaque, authz: []string{"DPoP " + testToken}, proofs: []string{key.sign(t, nil)}})), "invalid_token")
+}
+
+// TestAccessTokenAuthTypesValidation refuses an empty list or an empty type.
+func TestAccessTokenAuthTypesValidation(t *testing.T) {
+	for _, v := range []interface{}{[]interface{}{}, []interface{}{" "}, "jwt"} {
+		if _, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{"accessTokenAuthTypes": v}); err == nil {
+			t.Errorf("GetPolicy accepted accessTokenAuthTypes %v", v)
+		}
+	}
+}
