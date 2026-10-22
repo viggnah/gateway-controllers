@@ -319,9 +319,13 @@ func TestRFC7638Thumbprint(t *testing.T) {
 
 // TestValidProofEveryAlgorithm accepts a valid proof signed with each supported algorithm.
 func TestValidProofEveryAlgorithm(t *testing.T) {
+	all := make([]interface{}, len(supportedAlgorithms))
+	for i, a := range supportedAlgorithms {
+		all[i] = a
+	}
 	for _, alg := range supportedAlgorithms {
 		t.Run(alg, func(t *testing.T) {
-			p := newTestPolicy(t, nil)
+			p := newTestPolicy(t, map[string]interface{}{"allowedAlgorithms": all})
 			key := newKey(t, alg)
 			req := dpopRequest(key, key.sign(t, nil))
 			expectAllowed(t, run(p, req))
@@ -1079,7 +1083,7 @@ func TestConfigDefaults(t *testing.T) {
 		c.requireNonce || c.forwardProof || len(c.htuOrigins) != 0 {
 		t.Errorf("defaults = %+v", c)
 	}
-	if c.algsChallenge != "ES256 ES384 ES512 PS256 PS384 PS512 RS256 RS384 RS512 EdDSA Ed25519" {
+	if c.algsChallenge != "ES256 ES384 ES512 PS256 PS384 PS512 EdDSA Ed25519" {
 		t.Errorf("algs = %q", c.algsChallenge)
 	}
 }
@@ -1302,4 +1306,34 @@ func TestAccessTokenAuthTypesValidation(t *testing.T) {
 			t.Errorf("GetPolicy accepted accessTokenAuthTypes %v", v)
 		}
 	}
+}
+
+// TestDefaultAlgorithmsAreFAPISafe refuses RS256 proofs by default, as FAPI 2.0
+// requires, and accepts them once listed.
+func TestDefaultAlgorithmsAreFAPISafe(t *testing.T) {
+	key := newKey(t, "RS256")
+	resp := expectRejected(t, run(newTestPolicy(t, nil), dpopRequest(key, key.sign(t, nil))), "invalid_dpop_proof")
+	if !strings.Contains(resp.Headers[wwwAuthenticateHeader], "alg is not one of the accepted algs") {
+		t.Errorf("challenge = %q", resp.Headers[wwwAuthenticateHeader])
+	}
+	p := newTestPolicy(t, map[string]interface{}{"allowedAlgorithms": []interface{}{"ES256", "RS256"}})
+	expectAllowed(t, run(p, dpopRequest(key, key.sign(t, nil))))
+}
+
+// TestPlainHTTPNeedsExplicitOrigin refuses a proof whose htu is http, even when it
+// matches the request, unless the http origin is listed in htuOrigins.
+func TestPlainHTTPNeedsExplicitOrigin(t *testing.T) {
+	key := newKey(t, "ES256")
+	httpProof := func() string {
+		return key.sign(t, func(c jwt.MapClaims, _ map[string]interface{}) { c["htu"] = "http://api.example.com/orders/v1/items" })
+	}
+	request := func(proof string) *policy.RequestHeaderContext {
+		return newRequest(reqOpts{auth: boundJWT(key.jkt), authz: []string{"DPoP " + testToken}, proofs: []string{proof}, scheme: "http"})
+	}
+	resp := expectRejected(t, run(newTestPolicy(t, nil), request(httpProof())), "invalid_dpop_proof")
+	if !strings.Contains(resp.Headers[wwwAuthenticateHeader], "htu must use https") {
+		t.Errorf("challenge = %q", resp.Headers[wwwAuthenticateHeader])
+	}
+	p := newTestPolicy(t, map[string]interface{}{"htuOrigins": []interface{}{"http://api.example.com"}})
+	expectAllowed(t, run(p, request(httpProof())))
 }

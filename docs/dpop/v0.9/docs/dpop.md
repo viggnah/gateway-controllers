@@ -19,7 +19,8 @@ The policy checks the proof and the binding. The access token itself is validate
 - Single-use proofs, per replica or across every replica through Redis; flooding the replay cache never makes a captured proof replayable
 - Optional server-issued nonces (RFC 9449 section 9), verifiable by every replica that shares the secret
 - Self-explanatory refusals: the `WWW-Authenticate` challenge and the JSON body name the check that failed
-- ES256/384/512, PS256/384/512, RS256/384/512 and Ed25519 (as `EdDSA` or the RFC 9864 `Ed25519`); HMAC and `none` are never accepted
+- ES256/384/512, PS256/384/512 and Ed25519 (as `EdDSA` or the RFC 9864 `Ed25519`) by default; RS256/384/512 on request, since FAPI 2.0 does not allow them; HMAC and `none` are never accepted
+- HTTPS only: a proof for a plain `http` URL is refused unless an administrator lists that origin
 
 ## Quick Start
 
@@ -65,7 +66,7 @@ The policy checks the proof and the binding. The access token itself is validate
 
    ```http
    HTTP/1.1 401 Unauthorized
-   WWW-Authenticate: DPoP error="invalid_dpop_proof", error_description="htu does not match the request URI", algs="ES256 ES384 ES512 PS256 PS384 PS512 RS256 RS384 RS512 EdDSA Ed25519"
+   WWW-Authenticate: DPoP error="invalid_dpop_proof", error_description="htu does not match the request URI", algs="ES256 ES384 ES512 PS256 PS384 PS512 EdDSA Ed25519"
    Content-Type: application/json
 
    {"error":"invalid_dpop_proof","error_description":"htu does not match the request URI"}
@@ -82,10 +83,10 @@ User parameters are set per API in the API definition. System parameters are set
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `mode` | enum | `required` | `required` accepts only DPoP-bound tokens with a valid proof. `optional` also lets unbound tokens through as bearer tokens (see [Example 3](#example-3-migrate-an-api-to-dpop)). A DPoP-bound token sent as a bearer token is refused in both modes. |
-| `allowedAlgorithms` | array | all supported | Proof signature algorithms accepted, from `ES256`, `ES384`, `ES512`, `PS256`, `PS384`, `PS512`, `RS256`, `RS384`, `RS512`, `EdDSA`, `Ed25519`. Sent to clients in the challenge's `algs`. For FAPI 2.0, use `[PS256, ES256, Ed25519, EdDSA]`. |
+| `allowedAlgorithms` | array | all but `RS*` | Proof signature algorithms accepted, from `ES256`, `ES384`, `ES512`, `PS256`, `PS384`, `PS512`, `RS256`, `RS384`, `RS512`, `EdDSA`, `Ed25519`. The default leaves out `RS256`, `RS384` and `RS512` (RSASSA-PKCS1-v1_5), which FAPI 2.0 does not allow; list them to accept them. Sent to clients in the challenge's `algs`. For FAPI 2.0, use `[PS256, ES256, Ed25519, EdDSA]`. |
 | `proofMaxAge` | string | `1m` | How long after its `iat` a proof is accepted. A proof is made for one request, so keep it short. |
 | `requireNonce` | boolean | `false` | Require gateway-issued nonces in proofs (see [Nonces](#nonces)). |
-| `htuOrigins` | array | `[]` | Public origins (`scheme://host[:port]`) a proof's `htu` may use. Set it when clients reach the gateway through a different scheme or host, such as a load balancer that terminates TLS. Empty: the `htu` must match the scheme and host the gateway receives. |
+| `htuOrigins` | array | `[]` | Public origins (`scheme://host[:port]`) a proof's `htu` may use. Set it when clients reach the gateway through a different scheme or host, such as a load balancer that terminates TLS. Empty: the `htu` must match the scheme and host the gateway receives. An `htu` must use `https` unless its `http` origin is listed here, so plain HTTP, for local testing or a trusted internal hop, is always an explicit choice. |
 | `forwardProof` | boolean | `false` | Forward the `DPoP` header to the backend. By default it is removed. |
 
 A value the policy cannot use, such as an unknown algorithm or an `htuOrigins` entry with a path, is refused when the API is deployed.
@@ -196,7 +197,7 @@ The policy runs in the request-header phase, after the access-token policy.
 
 1. **Find the binding.** Policies hand authentication results to later policies through the authentication context, a per-request record inside the gateway that clients cannot write to. The DPoP policy considers only the layers written by an access-token policy, those whose type is in `accesstokenauthtypes` (JWT Auth, Opaque Token Auth and MCP Auth by default), and reads the newest one that carries `cnf`. Layers from other policies are ignored, even if they carry a `cnf` value: client credentials without a token (API Key Auth, Basic Auth, Mutual TLS Auth) and credentials the gateway sends to the backend (OAuth2 Generator, AWS Authentication). A `cnf` without `jkt` (for example an mTLS-bound token's `x5t#S256`) is not a DPoP binding. A binding it cannot read reliably is refused, not treated as unbound: a `cnf` that is not an object, a `jkt` that is not a non-empty string, or an introspected `token_type` of `DPoP` without `cnf.jkt`. With no layer from an access-token policy, it refuses the request, in both modes, and logs `dpop: no access-token policy authenticated the request` at most once a minute.
 2. **Check the scheme.** More than one `Authorization` header is refused with `400`. A bound token must use the `DPoP` scheme. An unbound `Bearer` token is refused in `required` mode and passes in `optional` mode, where a stray `DPoP` header is removed. An unbound token with the `DPoP` scheme is refused.
-3. **Verify the proof.** One `DPoP` header of at most 8 KB; `typ` is `dpop+jwt`; `alg` is accepted; no `crit` header; `jwk` is a public key matching `alg` (EC P-256/P-384/P-521 on the curve, RSA 2048 to 8192 bits, or Ed25519) with no private members, and the signature verifies with it. The key comes only from `jwk`; `kid`, `jku`, `x5u` and `x5c` are never used. Then `jti`, `htm`, `htu`, `iat` and `ath` are present; `htm` equals the method; `htu` matches the request URI ([Matching htu](#matching-htu)); `iat` is at most `clockskew` in the future and `proofMaxAge` plus `clockskew` in the past; the nonce is valid (with `requireNonce`); `ath` is the access token's hash; and the `jwk` thumbprint equals `cnf.jkt`.
+3. **Verify the proof.** One `DPoP` header of at most 8 KB; `typ` is `dpop+jwt`; `alg` is accepted; no `crit` header; `jwk` is a public key matching `alg` (EC P-256/P-384/P-521 on the curve, RSA 2048 to 8192 bits, or Ed25519) with no private members, and the signature verifies with it. The key comes only from `jwk`; `kid`, `jku`, `x5u` and `x5c` are never used. Then `jti`, `htm`, `htu`, `iat` and `ath` are present; `htm` equals the method; `htu` matches the request URI ([Matching htu](#matching-htu)) and uses `https` (or an `http` origin listed in `htuOrigins`); `iat` is at most `clockskew` in the future and `proofMaxAge` plus `clockskew` in the past; the nonce is valid (with `requireNonce`); `ath` is the access token's hash; and the `jwk` thumbprint equals `cnf.jkt`.
 4. **Record it.** The proof's `jti` is recorded for this key until the proof would expire anyway. A `jti` seen before is a replay. Recording happens only after every other check passes, so a refused proof never uses one up.
 5. **Continue.** The `DPoP` header is removed (unless `forwardProof`), and the key thumbprint is stored in the shared metadata as `dpop.jkt` for later policies. `Authorization` and the access-token policy's authentication context are left as they are.
 
@@ -327,6 +328,7 @@ Each refusal names the check that failed in `error_description`, in both the `WW
 | 401 `invalid_dpop_proof` | `jti is missing or longer than 512 characters`, `htm or htu is missing`, `iat is missing or not a number`, `ath is missing` | Include every required claim. |
 | 401 `invalid_dpop_proof` | `htm does not match the request method` | Set `htm` to the request's method, in upper case. |
 | 401 `invalid_dpop_proof` | `htu does not match the request URI` | Set `htu` to the URL called, without query. Behind a load balancer that terminates TLS, set `htuOrigins` (see [Load Balancers](#load-balancers-ingress-and-htu)). |
+| 401 `invalid_dpop_proof` | `htu must use https` | Call the API over HTTPS. For local testing over plain HTTP, list the `http://…` origin in `htuOrigins`. |
 | 401 `invalid_dpop_proof` | `iat is in the future`, `proof has expired (iat is too old)` | Create a new proof for every request, with `iat` set to now. Synchronize the client's clock (NTP); the gateway allows `clockskew` (30 seconds) of difference. |
 | 401 `invalid_dpop_proof` | `ath does not match the access token` | Hash the exact access token sent in `Authorization`. |
 | 401 `invalid_dpop_proof` | `proof has already been used` | Create a new proof, with a new `jti`, for every request, including retries. |

@@ -77,6 +77,9 @@ var privateJWKMembers = []string{"d", "p", "q", "dp", "dq", "qi", "oth", "k"}
 type htuTarget struct {
 	origins []string
 	path    string
+	// configured reports origins that came from htuOrigins, where an administrator
+	// may deliberately list a plain-HTTP origin.
+	configured bool
 }
 
 // headerErr is a rejection found while reading the proof's JOSE header. desc is a
@@ -171,6 +174,12 @@ func (p *DPoPPolicy) verifyProof(ctx context.Context, proof, method string, targ
 	// Check 9: the URI, ignoring query and fragment, after normalization.
 	if !htuMatches(htu, target) {
 		return verified, errInvalidProof("htu does not match the request URI")
+	}
+	// DPoP relies on TLS (RFC 9449 section 11.7): a proof sent in clear text can be
+	// captured and replayed. Plain HTTP is accepted only for an origin an
+	// administrator listed in htuOrigins.
+	if !target.configured && strings.HasPrefix(strings.ToLower(htu), "http:") {
+		return verified, errInvalidProof("htu must use https")
 	}
 
 	// Checks 10 and 11: freshness. iat bounds the proof's age; with nonces, the

@@ -81,6 +81,15 @@ var supportedAlgorithms = []string{
 	"EdDSA", "Ed25519",
 }
 
+// defaultAlgorithms are the algorithms accepted when allowedAlgorithms is not set:
+// every supported one except RSASSA-PKCS1-v1_5 (RS256/384/512), which FAPI 2.0
+// (section 5.4.1) does not allow. RS* stays available by listing it.
+var defaultAlgorithms = []string{
+	"ES256", "ES384", "ES512",
+	"PS256", "PS384", "PS512",
+	"EdDSA", "Ed25519",
+}
+
 // config is a policy instance's parsed, validated parameters.
 type config struct {
 	mode          string
@@ -406,6 +415,7 @@ func (p *DPoPPolicy) requestTarget(req *policy.DownstreamRequest) (htuTarget, er
 	target := htuTarget{path: normalizePath(path)}
 	if len(p.cfg.htuOrigins) > 0 {
 		target.origins = p.cfg.htuOrigins
+		target.configured = true
 		return target, nil
 	}
 	scheme := strings.ToLower(req.Scheme)
@@ -540,7 +550,7 @@ func parseConfig(params map[string]interface{}) (config, error) {
 		return cfg, fmt.Errorf("mode must be %q or %q, got %q", modeRequired, modeOptional, cfg.mode)
 	}
 
-	algs, err := stringListParam(params, "allowedAlgorithms", supportedAlgorithms)
+	algs, err := stringListParam(params, "allowedAlgorithms", defaultAlgorithms)
 	if err != nil {
 		return cfg, err
 	}

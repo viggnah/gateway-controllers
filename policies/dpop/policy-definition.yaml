@@ -28,15 +28,17 @@ parameters:
       description: >-
         JWS algorithms accepted for the DPoP proof signature. Only asymmetric
         algorithms are supported. "Ed25519" is the RFC 9864 name for what "EdDSA"
-        denotes with an Ed25519 key; list both to accept either. For FAPI 2.0, use
-        [PS256, ES256, Ed25519, EdDSA]. The list is advertised to clients in the algs
-        parameter of the WWW-Authenticate challenge.
+        denotes with an Ed25519 key; list both to accept either. The default leaves
+        out RS256/384/512 (RSASSA-PKCS1-v1_5), which FAPI 2.0 does not allow; list
+        them to accept them. For FAPI 2.0, use [PS256, ES256, Ed25519, EdDSA]. The
+        list is advertised to clients in the algs parameter of the WWW-Authenticate
+        challenge.
       minItems: 1
       uniqueItems: true
       items:
         type: string
         enum: [ES256, ES384, ES512, PS256, PS384, PS512, RS256, RS384, RS512, EdDSA, Ed25519]
-      default: [ES256, ES384, ES512, PS256, PS384, PS512, RS256, RS384, RS512, EdDSA, Ed25519]
+      default: [ES256, ES384, ES512, PS256, PS384, PS512, EdDSA, Ed25519]
 
     proofMaxAge:
       type: string
@@ -68,7 +70,9 @@ parameters:
         example "https://api.example.com". Set this when the gateway is behind a
         load balancer or TLS terminator, so the origin the client sees differs
         from the scheme and host the gateway receives. When empty, the htu origin
-        must match the request's own scheme and :authority.
+        must match the request's own scheme and :authority. An htu must use https
+        unless its http origin is listed here, so plain HTTP is always an explicit
+        choice (for example for local testing).
       default: []
       items:
         type: string
