@@ -27,7 +27,9 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"math/big"
@@ -41,8 +43,11 @@ import (
 )
 
 const (
-	testToken = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2ln"
-	testHTU   = "https://api.example.com/orders/v1/items"
+	// testToken is a JWT access token (signature not real) with jti at-7f3c9e, the
+	// TokenId jwt-auth records for it.
+	testToken    = "eyJhbGciOiJSUzI1NiIsInR5cCI6ImF0K2p3dCJ9.eyJpc3MiOiJodHRwczovL2lkcC5leGFtcGxlIiwic3ViIjoiYWxpY2UiLCJqdGkiOiJhdC03ZjNjOWUifQ.c2ln"
+	testTokenJTI = "at-7f3c9e"
+	testHTU      = "https://api.example.com/orders/v1/items"
 )
 
 var testNow = time.Unix(1_800_000_000, 0)
@@ -170,8 +175,16 @@ func boundJWT(jkt string) *policy.AuthContext {
 		Authenticated:   true,
 		AuthType:        "jwt",
 		Subject:         "alice",
+		Issuer:          "https://idp.example",
+		TokenId:         testTokenJTI,
 		TypedProperties: map[string]interface{}{"cnf": map[string]interface{}{"jkt": jkt}},
 	}
+}
+
+// fingerprint is the TokenId opaque-token-auth records: the token's hex SHA-256.
+func fingerprint(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 // unboundJWT is the AuthContext of a token with no cnf claim.
@@ -275,8 +288,10 @@ func TestRFC9449ExampleProof(t *testing.T) {
 
 	p := newTestPolicy(t, nil)
 	p.now = func() time.Time { return time.Unix(1562262618, 0) }
+	auth := boundJWT(jkt)
+	auth.TokenId = fingerprint(token) // an opaque token, as opaque-token-auth records it
 	req := newRequest(reqOpts{
-		auth:      boundJWT(jkt),
+		auth:      auth,
 		authz:     []string{"DPoP " + token},
 		proofs:    []string{proof},
 		authority: "resource.example.org",
@@ -292,7 +307,7 @@ func TestRFC9449ExampleProof(t *testing.T) {
 
 	// The same proof a second time is a replay.
 	expectRejected(t, run(p, newRequest(reqOpts{
-		auth: boundJWT(jkt), authz: []string{"DPoP " + token}, proofs: []string{proof},
+		auth: auth, authz: []string{"DPoP " + token}, proofs: []string{proof},
 		authority: "resource.example.org", path: "/protectedresource",
 	})), "invalid_dpop_proof")
 }
@@ -351,7 +366,7 @@ func TestOpaqueTokenBindingFromProperties(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	key := newKey(t, "ES256")
 	cnf, _ := json.Marshal(map[string]string{"jkt": key.jkt})
-	auth := &policy.AuthContext{Authenticated: true, AuthType: "opaque", Properties: map[string]string{"cnf": string(cnf)}}
+	auth := &policy.AuthContext{Authenticated: true, AuthType: "opaque", TokenId: fingerprint(testToken), Properties: map[string]string{"cnf": string(cnf)}}
 	req := newRequest(reqOpts{auth: auth, authz: []string{"DPoP " + testToken}, proofs: []string{key.sign(t, nil)}})
 	expectAllowed(t, run(p, req))
 }
@@ -1173,7 +1188,7 @@ func TestOpaqueTokenTypeDPoPWithBinding(t *testing.T) {
 	p := newTestPolicy(t, nil)
 	key := newKey(t, "ES256")
 	cnf, _ := json.Marshal(map[string]string{"jkt": key.jkt})
-	auth := &policy.AuthContext{Authenticated: true, AuthType: "opaque",
+	auth := &policy.AuthContext{Authenticated: true, AuthType: "opaque", TokenId: fingerprint(testToken),
 		Properties: map[string]string{"cnf": string(cnf), "token_type": "DPoP"}}
 	req := newRequest(reqOpts{auth: auth, authz: []string{"DPoP " + testToken}, proofs: []string{key.sign(t, nil)}})
 	expectAllowed(t, run(p, req))
@@ -1336,4 +1351,56 @@ func TestPlainHTTPNeedsExplicitOrigin(t *testing.T) {
 	}
 	p := newTestPolicy(t, map[string]interface{}{"htuOrigins": []interface{}{"http://api.example.com"}})
 	expectAllowed(t, run(p, request(httpProof())))
+}
+
+// TestAuthorizationTokenMustBeTheValidatedOne refuses a request whose Authorization
+// token, which the proof's ath covers, is not the token the access-token policy
+// validated, as happens when that policy reads the token from another header.
+func TestAuthorizationTokenMustBeTheValidatedOne(t *testing.T) {
+	key := newKey(t, "ES256")
+	jwtWith := func(claims map[string]interface{}) string {
+		payload, _ := json.Marshal(claims)
+		return "eyJhbGciOiJSUzI1NiJ9." + enc(payload) + ".c2ln"
+	}
+	cnf := map[string]interface{}{"jkt": key.jkt}
+	send := func(auth *policy.AuthContext, token string) policy.RequestHeaderAction {
+		proof := key.sign(t, func(c jwt.MapClaims, _ map[string]interface{}) { c["ath"] = accessTokenHash(token) })
+		return run(newTestPolicy(t, nil), newRequest(reqOpts{auth: auth, authz: []string{"DPoP " + token}, proofs: []string{proof}}))
+	}
+	mismatch := func(t *testing.T, action policy.RequestHeaderAction) {
+		t.Helper()
+		resp := expectRejected(t, action, "invalid_token")
+		if !strings.Contains(resp.Headers[wwwAuthenticateHeader], "access token mismatch") {
+			t.Errorf("challenge = %q", resp.Headers[wwwAuthenticateHeader])
+		}
+	}
+
+	t.Run("custom header: policy validated token B, Authorization carries token A", func(t *testing.T) {
+		validated := boundJWT(key.jkt) // jwt-auth recorded token B's jti
+		mismatch(t, send(validated, jwtWith(map[string]interface{}{"jti": "token-A", "iss": "https://idp.example", "cnf": cnf})))
+		mismatch(t, send(validated, "an-arbitrary-string"))
+	})
+	t.Run("opaque fingerprint matches", func(t *testing.T) {
+		auth := boundJWT(key.jkt)
+		auth.AuthType, auth.TokenId = "opaque", fingerprint("opaque-token-123")
+		expectAllowed(t, send(auth, "opaque-token-123"))
+		mismatch(t, send(auth, "opaque-token-456"))
+	})
+	t.Run("jwt jti matches", func(t *testing.T) {
+		auth := boundJWT(key.jkt)
+		auth.TokenId = "jti-42"
+		expectAllowed(t, send(auth, jwtWith(map[string]interface{}{"jti": "jti-42", "cnf": cnf})))
+	})
+	t.Run("jwt without jti: same issuer and binding", func(t *testing.T) {
+		auth := boundJWT(key.jkt)
+		auth.TokenId = ""
+		expectAllowed(t, send(auth, jwtWith(map[string]interface{}{"iss": "https://idp.example", "cnf": cnf})))
+		mismatch(t, send(auth, jwtWith(map[string]interface{}{"iss": "https://other.example", "cnf": cnf})))
+		mismatch(t, send(auth, jwtWith(map[string]interface{}{"iss": "https://idp.example", "cnf": map[string]interface{}{"jkt": "other"}})))
+	})
+	t.Run("nothing to compare: refused", func(t *testing.T) {
+		auth := boundJWT(key.jkt)
+		auth.TokenId = ""
+		mismatch(t, send(auth, "opaque-token-123"))
+	})
 }

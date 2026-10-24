@@ -230,6 +230,13 @@ func (p *DPoPPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Reques
 	if token == "" {
 		return p.reject(shared, errInvalidToken("empty access token", "malformed authorization header"))
 	}
+	// The proof's ath covers the token in Authorization; the binding comes from the
+	// token the access-token policy validated. They must be the same token, or a
+	// policy reading another header could validate one token while the proof
+	// covers a different one.
+	if !sameToken(binding.layer, token, jkt) {
+		return p.reject(shared, errInvalidToken("Authorization token is not the token the access-token policy validated", "access token mismatch"))
+	}
 
 	proof, perr := singleProof(proofs)
 	if perr != nil {
@@ -289,10 +296,11 @@ func (p *DPoPPolicy) allow(proofPresent bool) policy.RequestHeaderAction {
 
 // binding is what the AuthContext chain says about the access token's DPoP binding.
 type binding struct {
-	authenticated bool     // an access-token policy authenticated the caller
-	jkt           string   // cnf.jkt of the token; empty when the token is not DPoP-bound
-	malformed     string   // why the binding could not be read, when it could not
-	ignored       []string // types of authenticated layers that are not access-token layers
+	authenticated bool                // an access-token policy authenticated the caller
+	jkt           string              // cnf.jkt of the token; empty when the token is not DPoP-bound
+	malformed     string              // why the binding could not be read, when it could not
+	ignored       []string            // types of authenticated layers that are not access-token layers
+	layer         *policy.AuthContext // the access-token layer the binding was read from
 }
 
 // tokenBinding walks the AuthContext chain, newest first, over the layers an
@@ -318,6 +326,7 @@ func tokenBinding(ac *policy.AuthContext, tokenTypes map[string]bool) binding {
 		}
 		if jkt != "" {
 			b.jkt = jkt
+			b.layer = layer
 			return b
 		}
 		// RFC 9449 section 6.2: an introspection response for a DPoP-bound token has
